@@ -1,4 +1,5 @@
 import 'dart:convert';
+import '../models/form_options.dart';
 
 import 'package:cookie_jar/cookie_jar.dart';
 import 'package:dio/dio.dart';
@@ -29,6 +30,8 @@ class ErpApi {
 
   late final Dio _dio;
   late final PersistCookieJar _cookieJar;
+
+  FormOptions? _formOptions;
 
   Future<void> init() async {
     final dir = await getApplicationDocumentsDirectory();
@@ -76,6 +79,7 @@ class ErpApi {
     } catch (_) {
       // ignore; clear local session regardless
     } finally {
+      _formOptions = null;
       await _cookieJar.deleteAll();
     }
   }
@@ -86,6 +90,41 @@ class ErpApi {
     final data = await _call('GET', '$_m.get_today_report');
     return TodayReport.fromJson(Map<String, dynamic>.from(data));
   }
+
+  // ---------- form data ----------
+
+  /// Cached for the app session; pass refresh: true to reload.
+  Future<FormOptions> getFormOptions({bool refresh = false}) async {
+    if (_formOptions != null && !refresh) return _formOptions!;
+    final data = await _call('GET', '$_m.get_form_options');
+    return _formOptions = FormOptions.fromJson(Map<String, dynamic>.from(data));
+  }
+
+  Future<List<PickItem>> searchCustomers(String txt) =>
+      _search('search_customers', txt);
+
+  Future<List<PickItem>> searchLeads(String txt) => _search('search_leads', txt);
+
+  Future<List<PickItem>> _search(String method, String txt) async {
+    final data = await _call('GET', '$_m.$method', query: {'txt': txt});
+    return (data as List)
+        .map((e) => PickItem.fromJson(Map<String, dynamic>.from(e)))
+        .toList();
+  }
+
+  Future<Map<String, dynamic>> getCustomerDetails(String customer) async =>
+      Map<String, dynamic>.from(await _call(
+        'GET',
+        '$_m.get_customer_details',
+        query: {'customer': customer},
+      ));
+
+  Future<Map<String, dynamic>> getLeadDetails(String lead) async =>
+      Map<String, dynamic>.from(await _call(
+        'GET',
+        '$_m.get_lead_details',
+        query: {'lead': lead},
+      ));
 
   // ---------- internals ----------
 

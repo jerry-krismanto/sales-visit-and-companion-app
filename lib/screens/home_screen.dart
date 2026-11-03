@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import '../models/daily_report.dart';
 import '../services/erp_api.dart';
 import 'login_screen.dart';
+import 'visit_form_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -57,11 +58,11 @@ class _HomeScreenState extends State<HomeScreen> {
     _goToLogin();
   }
 
-  void _openVisitForm() {
-    // Replaced in the next step with the real visit form.
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Form kunjungan dibuat di langkah berikutnya.')),
+  Future<void> _openVisitForm() async {
+    final updated = await Navigator.of(context).push<TodayReport>(
+      MaterialPageRoute(builder: (_) => const VisitFormScreen()),
     );
+    if (updated != null && mounted) setState(() => _today = updated);
   }
 
   @override
