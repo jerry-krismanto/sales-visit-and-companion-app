@@ -1,18 +1,35 @@
+import 'dart:convert';
+
 import 'package:cookie_jar/cookie_jar.dart';
 import 'package:dio/dio.dart';
 import 'package:dio_cookie_manager/dio_cookie_manager.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../config.dart';
+import '../models/daily_report.dart';
+
+class ApiException implements Exception {
+  ApiException(this.message);
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
+class SessionExpiredException extends ApiException {
+  SessionExpiredException()
+      : super('Sesi Anda telah berakhir. Silakan login kembali.');
+}
 
 class ErpApi {
   ErpApi._();
   static final ErpApi instance = ErpApi._();
 
+  static const _m = '/api/method/addons.custom_functions.mobile_api';
+
   late final Dio _dio;
   late final PersistCookieJar _cookieJar;
 
-  /// Call once at app startup.
   Future<void> init() async {
     final dir = await getApplicationDocumentsDirectory();
     _cookieJar = PersistCookieJar(
@@ -26,7 +43,8 @@ class ErpApi {
       ..interceptors.add(CookieManager(_cookieJar));
   }
 
-  /// Logs in and returns the user's full name.
+  // ---------- auth ----------
+
   Future<String> login(String usr, String pwd) async {
     try {
       final res = await _dio.post(
@@ -35,11 +53,13 @@ class ErpApi {
       );
       return res.data['full_name'] ?? usr;
     } on DioException catch (e) {
-      throw Exception(_errorMessage(e));
+      if (e.response?.statusCode == 401) {
+        throw ApiException('Username atau password salah.');
+      }
+      throw ApiException(_errorMessage(e));
     }
   }
 
-  /// Returns the logged-in user ID, or null if not logged in / session expired.
   Future<String?> getLoggedUser() async {
     try {
       final res = await _dio.get('/api/method/frappe.auth.get_logged_user');
@@ -54,20 +74,83 @@ class ErpApi {
     try {
       await _dio.post('/api/method/logout');
     } catch (_) {
-      // ignore server errors; clear local session regardless
+      // ignore; clear local session regardless
     } finally {
       await _cookieJar.deleteAll();
     }
   }
 
+  // ---------- daily report ----------
+
+  Future<TodayReport> getTodayReport() async {
+    final data = await _call('GET', '$_m.get_today_report');
+    return TodayReport.fromJson(Map<String, dynamic>.from(data));
+  }
+
+  // ---------- internals ----------
+
+  Future<dynamic> _call(
+    String method,
+    String path, {
+    Map<String, dynamic>? query,
+    Object? data,
+  }) async {
+    try {
+      final res = await _dio.request(
+        path,
+        queryParameters: query,
+        data: data,
+        options: Options(method: method),
+      );
+      return res.data is Map ? res.data['message'] : res.data;
+    } on DioException catch (e) {
+      final code = e.response?.statusCode;
+      // 401/403 can mean "session gone" or "not allowed"; ask the server which
+      if ((code == 401 || code == 403) && await getLoggedUser() == null) {
+        await _cookieJar.deleteAll();
+        throw SessionExpiredException();
+      }
+      throw ApiException(_errorMessage(e));
+    }
+  }
+
   String _errorMessage(DioException e) {
-    if (e.response?.statusCode == 401) {
-      return 'Username atau password salah.';
+    final data = e.response?.data;
+    if (data is Map) {
+      final msg = _serverMessage(data);
+      if (msg != null) return msg;
     }
     if (e.type == DioExceptionType.connectionTimeout ||
+        e.type == DioExceptionType.receiveTimeout ||
         e.type == DioExceptionType.connectionError) {
-      return 'Tidak dapat terhubung ke server.';
+      return 'Tidak dapat terhubung ke server. Periksa koneksi internet Anda.';
     }
     return 'Terjadi kesalahan (${e.response?.statusCode ?? e.type.name}).';
   }
+
+  /// Frappe puts user-facing errors in `_server_messages` (a JSON list of JSON strings).
+  String? _serverMessage(Map data) {
+    final raw = data['_server_messages'];
+    if (raw is String) {
+      try {
+        final msgs = (jsonDecode(raw) as List)
+            .map((m) {
+              final d = m is String ? jsonDecode(m) : m;
+              return d is Map ? d['message']?.toString() : d?.toString();
+            })
+            .whereType<String>()
+            .map(_stripHtml)
+            .where((s) => s.isNotEmpty)
+            .toList();
+        if (msgs.isNotEmpty) return msgs.join('\n');
+      } catch (_) {}
+    }
+    final exc = data['exception'];
+    if (exc is String && exc.contains(':')) {
+      return _stripHtml(exc.substring(exc.indexOf(':') + 1));
+    }
+    return null;
+  }
+
+  String _stripHtml(String s) => s.replaceAll(RegExp(r'<[^>]*>'), '').trim();
 }

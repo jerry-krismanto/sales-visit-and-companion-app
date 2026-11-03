@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:intl/date_symbol_data_local.dart';
 
 import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
@@ -6,6 +7,7 @@ import 'services/erp_api.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await initializeDateFormatting('id_ID');
   await ErpApi.instance.init();
   final user = await ErpApi.instance.getLoggedUser();
   runApp(SalesVisitApp(loggedIn: user != null));
