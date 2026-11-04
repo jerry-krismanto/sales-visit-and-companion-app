@@ -1,5 +1,5 @@
 import 'dart:convert';
-import '../models/form_options.dart';
+import 'dart:typed_data';
 
 import 'package:cookie_jar/cookie_jar.dart';
 import 'package:dio/dio.dart';
@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../config.dart';
 import '../models/daily_report.dart';
+import '../models/form_options.dart';
 
 class ApiException implements Exception {
   ApiException(this.message);
@@ -104,6 +105,29 @@ class ErpApi {
     });
     final data = await _call('POST', '$_m.add_visit', data: form);
     return TodayReport.fromJson(Map<String, dynamic>.from(data));
+  }
+
+    Future<TodayReport> updateVisit(
+      String name, Map<String, dynamic> fields) async {
+    final data = await _call('POST', '$_m.update_visit', data: {
+      'visit': {...fields, 'name': name},
+    });
+    return TodayReport.fromJson(Map<String, dynamic>.from(data));
+  }
+
+  Future<TodayReport> deleteVisit(String name) async {
+    final data =
+        await _call('POST', '$_m.delete_visit', data: {'visit_name': name});
+    return TodayReport.fromJson(Map<String, dynamic>.from(data));
+  }
+
+  /// Downloads a (private) file with the session cookie.
+  Future<Uint8List> getFileBytes(String fileUrl) async {
+    final res = await _dio.get<List<int>>(
+      fileUrl,
+      options: Options(responseType: ResponseType.bytes),
+    );
+    return Uint8List.fromList(res.data!);
   }
 
   // ---------- form data ----------

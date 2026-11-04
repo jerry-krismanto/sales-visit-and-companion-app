@@ -58,15 +58,20 @@ class _HomeScreenState extends State<HomeScreen> {
     _goToLogin();
   }
 
-  Future<void> _openVisitForm() async {
-    final updated = await Navigator.of(context).push<TodayReport>(
-      MaterialPageRoute(builder: (_) => const VisitFormScreen()),
+  Future<void> _openVisitForm([Visit? visit]) async {
+    final editable = _today?.report?.isEditable ?? false;
+    final result = await Navigator.of(context).push<VisitFormResult>(
+      MaterialPageRoute(
+        builder: (_) => VisitFormScreen(
+          visit: visit,
+          readOnly: visit != null && !editable,
+        ),
+      ),
     );
-    if (updated != null && mounted) {
-      setState(() => _today = updated);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Kunjungan tersimpan.')),
-      );
+    if (result != null && mounted) {
+      setState(() => _today = result.report);
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(result.message)));
     }
   }
 
@@ -88,7 +93,7 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       floatingActionButton: canAdd
           ? FloatingActionButton.extended(
-              onPressed: _openVisitForm,
+              onPressed: () => _openVisitForm(),
               icon: const Icon(Icons.add_location_alt_outlined),
               label: const Text('Tambah Kunjungan'),
             )
@@ -107,8 +112,8 @@ class _HomeScreenState extends State<HomeScreen> {
     return RefreshIndicator(
       onRefresh: _load,
       child: _today!.report == null
-          ? _WelcomeView(today: _today!, onStart: _openVisitForm)
-          : _ReportView(today: _today!),
+          ? _WelcomeView(today: _today!, onStart: () => _openVisitForm())
+          : _ReportView(today: _today!, onOpen: (v) => _openVisitForm(v)),
     );
   }
 }
@@ -159,9 +164,10 @@ class _WelcomeView extends StatelessWidget {
 // ---------- today's report ----------
 
 class _ReportView extends StatelessWidget {
-  const _ReportView({required this.today});
+  const _ReportView({required this.today, required this.onOpen});
 
   final TodayReport today;
+  final void Function(Visit) onOpen;
 
   @override
   Widget build(BuildContext context) {
@@ -222,16 +228,17 @@ class _ReportView extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 8),
-        ...report.visits.map((v) => _VisitCard(visit: v)),
+        ...report.visits.map((v) => _VisitCard(visit: v, onTap: () => onOpen(v))),
       ],
     );
   }
 }
 
 class _VisitCard extends StatelessWidget {
-  const _VisitCard({required this.visit});
+  const _VisitCard({required this.visit, required this.onTap});
 
   final Visit visit;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -244,6 +251,7 @@ class _VisitCard extends StatelessWidget {
 
     return Card(
       child: ListTile(
+        onTap: onTap,
         leading: CircleAvatar(child: Text('${visit.idx}')),
         title: Text(visit.title),
         subtitle: Text(subtitle.isEmpty ? '-' : subtitle),

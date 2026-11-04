@@ -1,18 +1,32 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
+import '../models/daily_report.dart';
 import '../models/form_options.dart';
 import '../services/erp_api.dart';
 import '../services/location_service.dart';
 import 'login_screen.dart';
 import 'search_picker_screen.dart';
 
+class VisitFormResult {
+  const VisitFormResult(this.report, this.message);
+
+  final TodayReport report;
+  final String message;
+}
+
 class VisitFormScreen extends StatefulWidget {
-  const VisitFormScreen({super.key});
+  const VisitFormScreen({super.key, this.visit, this.readOnly = false});
+
+  /// null = new visit; otherwise view/edit an existing one.
+  final Visit? visit;
+  final bool readOnly;
 
   @override
   State<VisitFormScreen> createState() => _VisitFormScreenState();
@@ -53,17 +67,40 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
   bool _loadingDetails = false;
   String? _tujuan, _priority, _kota;
   XFile? _photo;
+  Future<Uint8List>? _savedPhoto;
   String? _targetError, _tujuanError, _photoError;
+  Map<String, String?> _initial = const {};
 
   bool _saving = false;
   String _savingStep = '';
 
+  bool get _isNew => widget.visit == null;
   bool get _isExisting => _jenis == 'Existing';
   List<String> get _typeText => _isExisting ? _existingText : _leadText;
 
   @override
   void initState() {
     super.initState();
+    final v = widget.visit;
+    if (v != null) {
+      _jenis = v.isExisting ? 'Existing' : 'New Lead';
+      _target = PickItem(
+        value: (v.isExisting ? v.data['nama_customer'] : v.data['nama_lead']) ?? '',
+        label: v.title,
+      );
+      for (final f in [..._commonText, ..._typeText]) {
+        _ctrl[f]!.text = v.data[f]?.toString() ?? '';
+      }
+      _tujuan = v.data['tujuan_berkunjung'];
+      _kota = v.data['kota'];
+      _priority = v.data['priority'];
+
+      final shot = v.data['screenshot'];
+      if (shot is String && shot.isNotEmpty) {
+        _savedPhoto = ErpApi.instance.getFileBytes(shot);
+      }
+      _initial = _snapshot();
+    }
     _loadOptions();
   }
 
@@ -85,6 +122,18 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     } catch (e) {
       if (mounted) setState(() => _loadError = e.toString());
     }
+  }
+
+  Map<String, String?> _snapshot() => {
+        for (final f in [..._commonText, ..._typeText]) f: _ctrl[f]!.text.trim(),
+        'tujuan_berkunjung': _tujuan,
+        'kota': _kota,
+        'priority': _priority,
+      };
+
+  bool _hasChanges() {
+    final now = _snapshot();
+    return now.keys.any((k) => now[k] != _initial[k]);
   }
 
   // ---------- session handling ----------
@@ -154,6 +203,28 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
         ],
       ),
     );
+  }
+
+  Future<bool> _confirm(String title, String message, String confirmLabel,
+      {String cancelLabel = 'Batal'}) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(cancelLabel),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(confirmLabel),
+          ),
+        ],
+      ),
+    );
+    return ok == true;
   }
 
   // ---------- selection ----------
@@ -280,7 +351,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     }
   }
 
-  // ---------- submit ----------
+  // ---------- new visit ----------
 
   Map<String, dynamic> _buildPayload() => {
         'jenis_kunjungan': _jenis,
@@ -329,7 +400,9 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
       final report = await _withRelogin(
         () => ErpApi.instance.addVisit(payload, _photo!.path),
       );
-      if (mounted) Navigator.of(context).pop(report);
+      if (mounted) {
+        Navigator.of(context).pop(VisitFormResult(report, 'Kunjungan tersimpan.'));
+      }
     } on MockLocationException catch (e) {
       await _showError('Fake GPS Terdeteksi', e.message);
     } on LocationException catch (e) {
@@ -348,48 +421,122 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     }
   }
 
-  Future<bool> _confirmDiscard() async {
-    final leave = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Batalkan kunjungan?'),
-        content: const Text('Data yang sudah diisi akan hilang.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Lanjut Mengisi'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Batalkan'),
-          ),
-        ],
-      ),
+  // ---------- edit / delete ----------
+
+  Future<void> _saveChanges() async {
+    setState(() {
+      _tujuanError = _tujuan == null ? 'Pilih tujuan berkunjung' : null;
+    });
+    if (_tujuanError != null) return;
+
+    setState(() {
+      _saving = true;
+      _savingStep = 'Menyimpan perubahan...';
+    });
+    try {
+      final fields = <String, dynamic>{
+        'tujuan_berkunjung': _tujuan,
+        'kota': _kota,
+        if (!_isExisting) 'priority': _priority,
+        for (final f in [..._commonText, ..._typeText])
+          f: _ctrl[f]!.text.trim(),
+      };
+      final report = await _withRelogin(
+        () => ErpApi.instance.updateVisit(widget.visit!.name, fields),
+      );
+      if (mounted) {
+        Navigator.of(context).pop(VisitFormResult(report, 'Perubahan tersimpan.'));
+      }
+    } on SessionExpiredException catch (e) {
+      _sessionExpired(e);
+    } catch (e) {
+      await _showError('Gagal Menyimpan', e.toString());
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _delete() async {
+    final ok = await _confirm(
+      'Hapus kunjungan?',
+      'Kunjungan ke ${widget.visit!.title} akan dihapus beserta fotonya.',
+      'Hapus',
     );
-    return leave == true;
+    if (!ok || !mounted) return;
+
+    setState(() {
+      _saving = true;
+      _savingStep = 'Menghapus...';
+    });
+    try {
+      final report = await _withRelogin(
+        () => ErpApi.instance.deleteVisit(widget.visit!.name),
+      );
+      if (mounted) {
+        Navigator.of(context).pop(VisitFormResult(report, 'Kunjungan dihapus.'));
+      }
+    } on SessionExpiredException catch (e) {
+      _sessionExpired(e);
+    } catch (e) {
+      await _showError('Gagal Menghapus', e.toString());
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   // ---------- UI ----------
 
   @override
   Widget build(BuildContext context) {
+    final String title;
+    if (_isNew) {
+      title = 'Kunjungan Baru';
+    } else if (widget.readOnly) {
+      title = 'Detail Kunjungan';
+    } else {
+      title = 'Edit Kunjungan';
+    }
+
     return PopScope(
-      canPop: _target == null && !_saving,
+      canPop: widget.readOnly || (_isNew && _target == null && !_saving),
       onPopInvokedWithResult: (didPop, _) async {
         if (didPop || _saving) return;
         final navigator = Navigator.of(context);
-        if (await _confirmDiscard()) navigator.pop();
+        if (!_isNew && !_hasChanges()) {
+          navigator.pop();
+          return;
+        }
+        final leave = _isNew
+            ? await _confirm('Batalkan kunjungan?',
+                'Data yang sudah diisi akan hilang.', 'Batalkan',
+                cancelLabel: 'Lanjut Mengisi')
+            : await _confirm('Batalkan perubahan?',
+                'Perubahan yang belum disimpan akan hilang.', 'Batalkan',
+                cancelLabel: 'Lanjut Mengedit');
+        if (leave) navigator.pop();
       },
       child: Scaffold(
-        appBar: AppBar(title: const Text('Kunjungan Baru')),
+        appBar: AppBar(
+          title: Text(title),
+          actions: [
+            if (!_isNew && !widget.readOnly)
+              IconButton(
+                icon: const Icon(Icons.delete_outline),
+                tooltip: 'Hapus',
+                onPressed: _saving ? null : _delete,
+              ),
+          ],
+        ),
         body: _buildBody(),
-        bottomNavigationBar: _options == null
+        bottomNavigationBar: (_options == null || widget.readOnly)
             ? null
             : SafeArea(
                 child: Padding(
                   padding: const EdgeInsets.all(16),
                   child: FilledButton(
-                    onPressed: (_loadingDetails || _saving) ? null : _submit,
+                    onPressed: (_loadingDetails || _saving)
+                        ? null
+                        : (_isNew ? _submit : _saveChanges),
                     child: _saving
                         ? Row(
                             mainAxisSize: MainAxisSize.min,
@@ -403,7 +550,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
                               Text(_savingStep),
                             ],
                           )
-                        : const Text('Simpan Kunjungan'),
+                        : Text(_isNew ? 'Simpan Kunjungan' : 'Simpan Perubahan'),
                   ),
                 ),
               ),
@@ -435,7 +582,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     }
 
     return AbsorbPointer(
-      absorbing: _saving,
+      absorbing: _saving || widget.readOnly,
       child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
@@ -453,7 +600,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
               ),
             ],
             selected: {_jenis},
-            onSelectionChanged: (s) => _switchJenis(s.first),
+            onSelectionChanged: _isNew ? (s) => _switchJenis(s.first) : null,
           ),
           const SizedBox(height: 16),
           _PickerField(
@@ -461,19 +608,32 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
             value: _target?.label,
             errorText: _targetError,
             loading: _loadingDetails,
-            onTap: _pickTarget,
+            onTap: _isNew ? _pickTarget : null,
           ),
+          if (!_isNew) _visitInfo(),
           if (_target != null) ..._detailFields(),
         ],
       ),
     );
   }
 
+  Widget _visitInfo() {
+    final v = widget.visit!;
+    final jam = v.jam;
+    final acc = v.data['gps_accuracy'];
+    final parts = [
+      if (jam != null) 'Waktu kunjungan ${DateFormat.Hm().format(jam)}',
+      if (acc is num && acc > 0) 'akurasi GPS ±${acc.round()} m',
+    ];
+    if (parts.isEmpty) return const SizedBox.shrink();
+    return Text(parts.join(' · '), style: Theme.of(context).textTheme.bodySmall);
+  }
+
   List<Widget> _detailFields() {
     final o = _options!;
     return [
-      _section('Foto Kunjungan *'),
-      _photoField(),
+      _section(_isNew ? 'Foto Kunjungan *' : 'Foto Kunjungan'),
+      _isNew ? _photoField() : _savedPhotoField(),
       _section('Kunjungan'),
       _PickerField(
         label: 'Tujuan Berkunjung *',
@@ -576,6 +736,42 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     );
   }
 
+  Widget _savedPhotoField() {
+    final theme = Theme.of(context);
+    if (_savedPhoto == null) {
+      return const Padding(
+        padding: EdgeInsets.only(bottom: 12),
+        child: Text('Tidak ada foto.'),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: FutureBuilder<Uint8List>(
+          future: _savedPhoto,
+          builder: (context, snap) {
+            if (snap.hasData) {
+              return Image.memory(snap.data!, height: 200, fit: BoxFit.cover);
+            }
+            if (snap.hasError) {
+              return Container(
+                height: 200,
+                color: theme.colorScheme.surfaceContainerHighest,
+                alignment: Alignment.center,
+                child: const Text('Foto tidak dapat dimuat.'),
+              );
+            }
+            return const SizedBox(
+              height: 200,
+              child: Center(child: CircularProgressIndicator()),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
   Widget _section(String title) => Padding(
         padding: const EdgeInsets.fromLTRB(0, 16, 0, 12),
         child: Text(title, style: Theme.of(context).textTheme.titleSmall),
@@ -610,12 +806,28 @@ class _PickerField extends StatelessWidget {
 
   final String label;
   final String? value;
-  final VoidCallback onTap;
+  final VoidCallback? onTap; // null = locked
   final String? errorText;
   final bool loading;
 
   @override
   Widget build(BuildContext context) {
+    final Widget? suffix;
+    if (loading) {
+      suffix = const Padding(
+        padding: EdgeInsets.all(12),
+        child: SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    } else if (onTap == null) {
+      suffix = const Icon(Icons.lock_outline, size: 18);
+    } else {
+      suffix = const Icon(Icons.arrow_drop_down);
+    }
+
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: InkWell(
@@ -627,16 +839,7 @@ class _PickerField extends StatelessWidget {
             labelText: label,
             errorText: errorText,
             border: const OutlineInputBorder(),
-            suffixIcon: loading
-                ? const Padding(
-                    padding: EdgeInsets.all(12),
-                    child: SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                  )
-                : const Icon(Icons.arrow_drop_down),
+            suffixIcon: suffix,
           ),
           child: Text(value ?? ''),
         ),
