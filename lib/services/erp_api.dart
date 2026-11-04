@@ -165,6 +165,12 @@ class ErpApi {
         query: {'lead': lead},
       ));
 
+  Future<PickItem> createLead(Map<String, dynamic> lead) async {
+    final data = await _call('POST', '$_m.create_lead', data: {'lead': lead});
+    final m = Map<String, dynamic>.from(data);
+    return PickItem(value: m['value'], label: m['label'] ?? m['value']);
+  }
+
   // ---------- internals ----------
 
   Future<dynamic> _call(

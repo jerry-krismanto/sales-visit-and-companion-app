@@ -22,11 +22,15 @@ class SearchPickerScreen extends StatefulWidget {
     required this.hint,
     required this.search,
     this.emptyText = 'Tidak ada data.',
+    this.createLabel,
+    this.onCreate,
   });
 
   final String hint;
   final PickerSearch search;
   final String emptyText;
+  final String? createLabel;
+  final Future<PickItem?> Function(String query)? onCreate;
 
   @override
   State<SearchPickerScreen> createState() => _SearchPickerScreenState();
@@ -77,6 +81,11 @@ class _SearchPickerScreenState extends State<SearchPickerScreen> {
     }
   }
 
+  Future<void> _create() async {
+    final item = await widget.onCreate!(_ctrl.text.trim());
+    if (item != null && mounted) Navigator.pop(context, item);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -94,6 +103,18 @@ class _SearchPickerScreenState extends State<SearchPickerScreen> {
       body: Column(
         children: [
           if (_loading) const LinearProgressIndicator(),
+          if (widget.onCreate != null) ...[
+            ListTile(
+              leading: Icon(Icons.add_circle_outline,
+                  color: Theme.of(context).colorScheme.primary),
+              title: Text(
+                widget.createLabel ?? 'Buat Baru',
+                style: TextStyle(color: Theme.of(context).colorScheme.primary),
+              ),
+              onTap: _create,
+            ),
+            const Divider(height: 1),
+          ],
           Expanded(child: _buildList()),
         ],
       ),

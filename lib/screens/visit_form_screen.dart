@@ -4,13 +4,14 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/daily_report.dart';
 import '../models/form_options.dart';
 import '../services/erp_api.dart';
 import '../services/location_service.dart';
+import '../widgets/form_widgets.dart';
+import 'create_lead_screen.dart';
 import 'login_screen.dart';
 import 'search_picker_screen.dart';
 
@@ -148,27 +149,8 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
         .showSnackBar(SnackBar(content: Text(e.message)));
   }
 
-  /// Runs [action]; if the session expired, asks for the password and retries once.
-  Future<T> _withRelogin<T>(Future<T> Function() action) async {
-    try {
-      return await action();
-    } on SessionExpiredException {
-      if (!await _relogin()) rethrow;
-      return await action();
-    }
-  }
-
-  Future<bool> _relogin() async {
-    final prefs = await SharedPreferences.getInstance();
-    final user = prefs.getString('last_user');
-    if (user == null || !mounted) return false;
-    final ok = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => _ReloginDialog(user: user),
-    );
-    return ok == true;
-  }
+  Future<T> _withRelogin<T>(Future<T> Function() action) =>
+      withRelogin(context, action);
 
   // ---------- helpers ----------
 
@@ -255,6 +237,8 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
           emptyText: _isExisting
               ? 'Customer tidak ditemukan.'
               : 'Lead tidak ditemukan.',
+          createLabel: _isExisting ? null : 'Buat Lead Baru',
+          onCreate: _isExisting ? null : _createLead,
         ),
       ),
     );
@@ -280,6 +264,12 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     }
   }
 
+  Future<PickItem?> _createLead(String query) {
+    return Navigator.of(context).push<PickItem>(
+      MaterialPageRoute(builder: (_) => CreateLeadScreen(initialName: query)),
+    );
+  }
+
   void _applyDetails(Map<String, dynamic> d) {
     setState(() {
       for (final f in [..._typeText, 'alamat']) {
@@ -292,31 +282,6 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
         _priority = (p != null && _options!.priority.contains(p)) ? p : null;
       }
     });
-  }
-
-  Future<String?> _pickOption(
-      String title, List<String> options, String? current) {
-    return showModalBottomSheet<String>(
-      context: context,
-      showDragHandle: true,
-      builder: (ctx) => SafeArea(
-        child: ListView(
-          shrinkWrap: true,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-              child: Text(title, style: Theme.of(ctx).textTheme.titleMedium),
-            ),
-            for (final o in options)
-              ListTile(
-                title: Text(o),
-                trailing: o == current ? const Icon(Icons.check) : null,
-                onTap: () => Navigator.pop(ctx, o),
-              ),
-          ],
-        ),
-      ),
-    );
   }
 
   Future<void> _pickKota() async {
@@ -603,7 +568,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
             onSelectionChanged: _isNew ? (s) => _switchJenis(s.first) : null,
           ),
           const SizedBox(height: 16),
-          _PickerField(
+          PickerField(
             label: _isExisting ? 'Customer *' : 'Lead *',
             value: _target?.label,
             errorText: _targetError,
@@ -635,12 +600,12 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
       _section(_isNew ? 'Foto Kunjungan *' : 'Foto Kunjungan'),
       _isNew ? _photoField() : _savedPhotoField(),
       _section('Kunjungan'),
-      _PickerField(
+      PickerField(
         label: 'Tujuan Berkunjung *',
         value: _tujuan,
         errorText: _tujuanError,
         onTap: () async {
-          final v = await _pickOption('Tujuan Berkunjung', o.tujuan, _tujuan);
+          final v = await pickOption(context, 'Tujuan Berkunjung', o.tujuan, _tujuan);
           if (v != null && mounted) {
             setState(() {
               _tujuan = v;
@@ -650,17 +615,17 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
         },
       ),
       if (!_isExisting)
-        _PickerField(
+        PickerField(
           label: 'Priority',
           value: _priority,
           onTap: () async {
-            final v = await _pickOption('Priority', o.priority, _priority);
+            final v = await pickOption(context, 'Priority', o.priority, _priority);
             if (v != null && mounted) setState(() => _priority = v);
           },
         ),
       _text('note', 'Note (Keterangan Tambahan)', maxLines: 3),
       _section('Lokasi'),
-      _PickerField(label: 'Kota', value: _kota, onTap: _pickKota),
+      PickerField(label: 'Kota', value: _kota, onTap: _pickKota),
       _text('alamat', 'Alamat', maxLines: 3),
       _section('PIC'),
       _text(_isExisting ? 'pic_customer' : 'pic_lead', 'Nama PIC'),
@@ -791,141 +756,6 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
           border: const OutlineInputBorder(),
         ),
       ),
-    );
-  }
-}
-
-class _PickerField extends StatelessWidget {
-  const _PickerField({
-    required this.label,
-    required this.value,
-    required this.onTap,
-    this.errorText,
-    this.loading = false,
-  });
-
-  final String label;
-  final String? value;
-  final VoidCallback? onTap; // null = locked
-  final String? errorText;
-  final bool loading;
-
-  @override
-  Widget build(BuildContext context) {
-    final Widget? suffix;
-    if (loading) {
-      suffix = const Padding(
-        padding: EdgeInsets.all(12),
-        child: SizedBox(
-          width: 20,
-          height: 20,
-          child: CircularProgressIndicator(strokeWidth: 2),
-        ),
-      );
-    } else if (onTap == null) {
-      suffix = const Icon(Icons.lock_outline, size: 18);
-    } else {
-      suffix = const Icon(Icons.arrow_drop_down);
-    }
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: InkWell(
-        onTap: loading ? null : onTap,
-        borderRadius: BorderRadius.circular(4),
-        child: InputDecorator(
-          isEmpty: value == null,
-          decoration: InputDecoration(
-            labelText: label,
-            errorText: errorText,
-            border: const OutlineInputBorder(),
-            suffixIcon: suffix,
-          ),
-          child: Text(value ?? ''),
-        ),
-      ),
-    );
-  }
-}
-
-class _ReloginDialog extends StatefulWidget {
-  const _ReloginDialog({required this.user});
-
-  final String user;
-
-  @override
-  State<_ReloginDialog> createState() => _ReloginDialogState();
-}
-
-class _ReloginDialogState extends State<_ReloginDialog> {
-  final _pwd = TextEditingController();
-  bool _loading = false;
-  String? _error;
-
-  @override
-  void dispose() {
-    _pwd.dispose();
-    super.dispose();
-  }
-
-  Future<void> _login() async {
-    if (_pwd.text.isEmpty || _loading) return;
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      await ErpApi.instance.login(widget.user, _pwd.text);
-      if (mounted) Navigator.pop(context, true);
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _error = e.toString();
-          _loading = false;
-        });
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Sesi Berakhir'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'Masukkan password untuk melanjutkan. '
-            'Data kunjungan Anda tidak hilang.',
-          ),
-          const SizedBox(height: 12),
-          Text(widget.user, style: Theme.of(context).textTheme.bodySmall),
-          TextField(
-            controller: _pwd,
-            obscureText: true,
-            autofocus: true,
-            decoration: InputDecoration(labelText: 'Password', errorText: _error),
-            onSubmitted: (_) => _login(),
-          ),
-        ],
-      ),
-      actions: [
-        TextButton(
-          onPressed: _loading ? null : () => Navigator.pop(context, false),
-          child: const Text('Batal'),
-        ),
-        FilledButton(
-          onPressed: _loading ? null : _login,
-          child: _loading
-              ? const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Text('Masuk'),
-        ),
-      ],
     );
   }
 }
