@@ -62,7 +62,12 @@ class _HomeScreenState extends State<HomeScreen> {
     final updated = await Navigator.of(context).push<TodayReport>(
       MaterialPageRoute(builder: (_) => const VisitFormScreen()),
     );
-    if (updated != null && mounted) setState(() => _today = updated);
+    if (updated != null && mounted) {
+      setState(() => _today = updated);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Kunjungan tersimpan.')),
+      );
+    }
   }
 
   @override

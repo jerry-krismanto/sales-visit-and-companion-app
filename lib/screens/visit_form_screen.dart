@@ -1,9 +1,13 @@
-import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:uuid/uuid.dart';
 
 import '../models/form_options.dart';
 import '../services/erp_api.dart';
+import '../services/location_service.dart';
 import 'login_screen.dart';
 import 'search_picker_screen.dart';
 
@@ -38,6 +42,9 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
       f: TextEditingController(),
   };
 
+  /// Same ID for every retry of this form, so the server can de-duplicate.
+  final _clientVisitId = const Uuid().v4();
+
   FormOptions? _options;
   String? _loadError;
 
@@ -45,7 +52,11 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
   PickItem? _target;
   bool _loadingDetails = false;
   String? _tujuan, _priority, _kota;
-  String? _targetError, _tujuanError;
+  XFile? _photo;
+  String? _targetError, _tujuanError, _photoError;
+
+  bool _saving = false;
+  String _savingStep = '';
 
   bool get _isExisting => _jenis == 'Existing';
   List<String> get _typeText => _isExisting ? _existingText : _leadText;
@@ -76,6 +87,8 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     }
   }
 
+  // ---------- session handling ----------
+
   void _sessionExpired(SessionExpiredException e) {
     if (!mounted) return;
     Navigator.of(context).pushAndRemoveUntil(
@@ -86,8 +99,61 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
         .showSnackBar(SnackBar(content: Text(e.message)));
   }
 
+  /// Runs [action]; if the session expired, asks for the password and retries once.
+  Future<T> _withRelogin<T>(Future<T> Function() action) async {
+    try {
+      return await action();
+    } on SessionExpiredException {
+      if (!await _relogin()) rethrow;
+      return await action();
+    }
+  }
+
+  Future<bool> _relogin() async {
+    final prefs = await SharedPreferences.getInstance();
+    final user = prefs.getString('last_user');
+    if (user == null || !mounted) return false;
+    final ok = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _ReloginDialog(user: user),
+    );
+    return ok == true;
+  }
+
+  // ---------- helpers ----------
+
   void _showSnack(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  Future<void> _showError(
+    String title,
+    String message, {
+    String? actionLabel,
+    Future<bool> Function()? action,
+  }) {
+    return showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          if (action != null)
+            TextButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                action();
+              },
+              child: Text(actionLabel ?? 'Buka Pengaturan'),
+            ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
   }
 
   // ---------- selection ----------
@@ -129,9 +195,9 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
       _loadingDetails = true;
     });
     try {
-      final details = jenis == 'Existing'
-          ? await ErpApi.instance.getCustomerDetails(item.value)
-          : await ErpApi.instance.getLeadDetails(item.value);
+      final details = await _withRelogin(() => jenis == 'Existing'
+          ? ErpApi.instance.getCustomerDetails(item.value)
+          : ErpApi.instance.getLeadDetails(item.value));
       if (!mounted || jenis != _jenis || _target?.value != item.value) return;
       _applyDetails(details);
     } on SessionExpiredException catch (e) {
@@ -194,7 +260,27 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     if (item != null && mounted) setState(() => _kota = item.value);
   }
 
-  // ---------- submit (part 1: preview only) ----------
+  Future<void> _takePhoto() async {
+    try {
+      final photo = await ImagePicker().pickImage(
+        source: ImageSource.camera,
+        preferredCameraDevice: CameraDevice.rear,
+        imageQuality: 70,
+        maxWidth: 1600,
+        maxHeight: 1600,
+      );
+      if (photo != null && mounted) {
+        setState(() {
+          _photo = photo;
+          _photoError = null;
+        });
+      }
+    } catch (e) {
+      if (mounted) _showSnack('Kamera tidak dapat dibuka: $e');
+    }
+  }
+
+  // ---------- submit ----------
 
   Map<String, dynamic> _buildPayload() => {
         'jenis_kunjungan': _jenis,
@@ -209,34 +295,57 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
           f: _ctrl[f]!.text.trim(),
       };
 
-  void _onNext() {
+  Future<void> _submit() async {
     setState(() {
       _targetError = _target == null
           ? (_isExisting ? 'Pilih customer' : 'Pilih lead')
           : null;
       _tujuanError = _tujuan == null ? 'Pilih tujuan berkunjung' : null;
+      _photoError = _photo == null ? 'Foto kunjungan wajib diambil' : null;
     });
-    if (_targetError != null || _tujuanError != null) return;
+    if (_targetError != null || _tujuanError != null || _photoError != null) {
+      return;
+    }
 
-    // Part 2 replaces this with GPS + photo + add_visit.
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Payload (preview)'),
-        content: SingleChildScrollView(
-          child: Text(
-            const JsonEncoder.withIndent('  ').convert(_buildPayload()),
-            style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Tutup'),
-          ),
-        ],
-      ),
-    );
+    setState(() {
+      _saving = true;
+      _savingStep = 'Mengambil lokasi...';
+    });
+    try {
+      final loc = await LocationService.getVisitLocation();
+      if (!mounted) return;
+      setState(() => _savingStep = 'Menyimpan kunjungan...');
+
+      final payload = {
+        ..._buildPayload(),
+        'client_visit_id': _clientVisitId,
+        'latitude': loc.latitude,
+        'longitude': loc.longitude,
+        'gps_accuracy': loc.accuracy,
+        'is_mock_location': 0,
+        'device_rooted': loc.deviceRooted ? 1 : 0,
+      };
+
+      final report = await _withRelogin(
+        () => ErpApi.instance.addVisit(payload, _photo!.path),
+      );
+      if (mounted) Navigator.of(context).pop(report);
+    } on MockLocationException catch (e) {
+      await _showError('Fake GPS Terdeteksi', e.message);
+    } on LocationException catch (e) {
+      await _showError(
+        'Lokasi Tidak Tersedia',
+        e.message,
+        actionLabel: e.fixLabel,
+        action: e.fix,
+      );
+    } on SessionExpiredException catch (e) {
+      _sessionExpired(e);
+    } catch (e) {
+      await _showError('Gagal Menyimpan', e.toString());
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   Future<bool> _confirmDiscard() async {
@@ -265,9 +374,9 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
   @override
   Widget build(BuildContext context) {
     return PopScope(
-      canPop: _target == null,
+      canPop: _target == null && !_saving,
       onPopInvokedWithResult: (didPop, _) async {
-        if (didPop) return;
+        if (didPop || _saving) return;
         final navigator = Navigator.of(context);
         if (await _confirmDiscard()) navigator.pop();
       },
@@ -280,8 +389,21 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
                 child: Padding(
                   padding: const EdgeInsets.all(16),
                   child: FilledButton(
-                    onPressed: _loadingDetails ? null : _onNext,
-                    child: const Text('Lanjut'),
+                    onPressed: (_loadingDetails || _saving) ? null : _submit,
+                    child: _saving
+                        ? Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              ),
+                              const SizedBox(width: 12),
+                              Text(_savingStep),
+                            ],
+                          )
+                        : const Text('Simpan Kunjungan'),
                   ),
                 ),
               ),
@@ -312,41 +434,46 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
       );
     }
 
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        SegmentedButton<String>(
-          segments: const [
-            ButtonSegment(
-              value: 'Existing',
-              label: Text('Existing'),
-              icon: Icon(Icons.store),
-            ),
-            ButtonSegment(
-              value: 'New Lead',
-              label: Text('New Lead'),
-              icon: Icon(Icons.person_add_alt),
-            ),
-          ],
-          selected: {_jenis},
-          onSelectionChanged: (s) => _switchJenis(s.first),
-        ),
-        const SizedBox(height: 16),
-        _PickerField(
-          label: _isExisting ? 'Customer *' : 'Lead *',
-          value: _target?.label,
-          errorText: _targetError,
-          loading: _loadingDetails,
-          onTap: _pickTarget,
-        ),
-        if (_target != null) ..._detailFields(),
-      ],
+    return AbsorbPointer(
+      absorbing: _saving,
+      child: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(
+                value: 'Existing',
+                label: Text('Existing'),
+                icon: Icon(Icons.store),
+              ),
+              ButtonSegment(
+                value: 'New Lead',
+                label: Text('New Lead'),
+                icon: Icon(Icons.person_add_alt),
+              ),
+            ],
+            selected: {_jenis},
+            onSelectionChanged: (s) => _switchJenis(s.first),
+          ),
+          const SizedBox(height: 16),
+          _PickerField(
+            label: _isExisting ? 'Customer *' : 'Lead *',
+            value: _target?.label,
+            errorText: _targetError,
+            loading: _loadingDetails,
+            onTap: _pickTarget,
+          ),
+          if (_target != null) ..._detailFields(),
+        ],
+      ),
     );
   }
 
   List<Widget> _detailFields() {
     final o = _options!;
     return [
+      _section('Foto Kunjungan *'),
+      _photoField(),
       _section('Kunjungan'),
       _PickerField(
         label: 'Tujuan Berkunjung *',
@@ -354,7 +481,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
         errorText: _tujuanError,
         onTap: () async {
           final v = await _pickOption('Tujuan Berkunjung', o.tujuan, _tujuan);
-          if (v != null) {
+          if (v != null && mounted) {
             setState(() {
               _tujuan = v;
               _tujuanError = null;
@@ -368,7 +495,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
           value: _priority,
           onTap: () async {
             final v = await _pickOption('Priority', o.priority, _priority);
-            if (v != null) setState(() => _priority = v);
+            if (v != null && mounted) setState(() => _priority = v);
           },
         ),
       _text('note', 'Note (Keterangan Tambahan)', maxLines: 3),
@@ -399,6 +526,54 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
         'Existing Coffee Machine',
       ),
     ];
+  }
+
+  Widget _photoField() {
+    final theme = Theme.of(context);
+    if (_photo == null) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            OutlinedButton.icon(
+              onPressed: _takePhoto,
+              icon: const Icon(Icons.photo_camera_outlined),
+              label: const Text('Ambil Foto'),
+            ),
+            if (_photoError != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4, left: 12),
+                child: Text(
+                  _photoError!,
+                  style: TextStyle(color: theme.colorScheme.error, fontSize: 12),
+                ),
+              ),
+          ],
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Image.file(
+              File(_photo!.path),
+              height: 200,
+              fit: BoxFit.cover,
+            ),
+          ),
+          TextButton.icon(
+            onPressed: _takePhoto,
+            icon: const Icon(Icons.refresh),
+            label: const Text('Ambil Ulang'),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _section(String title) => Padding(
@@ -466,6 +641,88 @@ class _PickerField extends StatelessWidget {
           child: Text(value ?? ''),
         ),
       ),
+    );
+  }
+}
+
+class _ReloginDialog extends StatefulWidget {
+  const _ReloginDialog({required this.user});
+
+  final String user;
+
+  @override
+  State<_ReloginDialog> createState() => _ReloginDialogState();
+}
+
+class _ReloginDialogState extends State<_ReloginDialog> {
+  final _pwd = TextEditingController();
+  bool _loading = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _pwd.dispose();
+    super.dispose();
+  }
+
+  Future<void> _login() async {
+    if (_pwd.text.isEmpty || _loading) return;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      await ErpApi.instance.login(widget.user, _pwd.text);
+      if (mounted) Navigator.pop(context, true);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _error = e.toString();
+          _loading = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Sesi Berakhir'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Masukkan password untuk melanjutkan. '
+            'Data kunjungan Anda tidak hilang.',
+          ),
+          const SizedBox(height: 12),
+          Text(widget.user, style: Theme.of(context).textTheme.bodySmall),
+          TextField(
+            controller: _pwd,
+            obscureText: true,
+            autofocus: true,
+            decoration: InputDecoration(labelText: 'Password', errorText: _error),
+            onSubmitted: (_) => _login(),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: _loading ? null : () => Navigator.pop(context, false),
+          child: const Text('Batal'),
+        ),
+        FilledButton(
+          onPressed: _loading ? null : _login,
+          child: _loading
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Text('Masuk'),
+        ),
+      ],
     );
   }
 }

@@ -91,6 +91,21 @@ class ErpApi {
     return TodayReport.fromJson(Map<String, dynamic>.from(data));
   }
 
+  Future<TodayReport> addVisit(
+      Map<String, dynamic> visit, String photoPath) async {
+    final isPng = photoPath.toLowerCase().endsWith('.png');
+    final form = FormData.fromMap({
+      'visit': jsonEncode(visit),
+      'photo': await MultipartFile.fromFile(
+        photoPath,
+        filename: isPng ? 'kunjungan.png' : 'kunjungan.jpg',
+        contentType: DioMediaType('image', isPng ? 'png' : 'jpeg'),
+      ),
+    });
+    final data = await _call('POST', '$_m.add_visit', data: form);
+    return TodayReport.fromJson(Map<String, dynamic>.from(data));
+  }
+
   // ---------- form data ----------
 
   /// Cached for the app session; pass refresh: true to reload.
