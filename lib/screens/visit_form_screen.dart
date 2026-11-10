@@ -1,7 +1,9 @@
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:uuid/uuid.dart';
@@ -66,6 +68,8 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
   String _jenis = 'Existing';
   PickItem? _target;
   bool _loadingDetails = false;
+  bool _detailsLoaded = false;
+  ({double lat, double lng})? _targetLocation;
   String? _tujuan, _priority, _kota;
   XFile? _photo;
   Future<Uint8List>? _savedPhoto;
@@ -77,6 +81,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
 
   bool get _isNew => widget.visit == null;
   bool get _isExisting => _jenis == 'Existing';
+  String get _targetLabel => _isExisting ? 'customer' : 'lead';
   List<String> get _typeText => _isExisting ? _existingText : _leadText;
 
   @override
@@ -217,6 +222,8 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
       _jenis = jenis;
       _target = null;
       _targetError = null;
+      _detailsLoaded = false;
+      _targetLocation = null;
       _kota = null;
       _priority = null;
       for (final f in [..._existingText, ..._leadText, 'alamat']) {
@@ -247,6 +254,8 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     setState(() {
       _target = item;
       _targetError = null;
+      _detailsLoaded = false;
+      _targetLocation = null;
       _loadingDetails = true;
     });
     try {
@@ -281,6 +290,17 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
         final p = d['priority'];
         _priority = (p != null && _options!.priority.contains(p)) ? p : null;
       }
+
+      final lokasi = d['lokasi'];
+      _targetLocation = (lokasi is Map &&
+              lokasi['latitude'] is num &&
+              lokasi['longitude'] is num)
+          ? (
+              lat: (lokasi['latitude'] as num).toDouble(),
+              lng: (lokasi['longitude'] as num).toDouble(),
+            )
+          : null;
+      _detailsLoaded = true;
     });
   }
 
@@ -331,6 +351,56 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
           f: _ctrl[f]!.text.trim(),
       };
 
+  /// Phone-side geofence check. Returns false if the visit must not be sent.
+  /// The server repeats the same check; this just gives a faster, clearer answer.
+  Future<bool> _passesGeofence(VisitLocation loc) async {
+    if (!_detailsLoaded) return true; // let the server decide
+    final opts = _options!;
+    final label = _targetLabel;
+    final target = _targetLocation;
+
+    if (target != null) {
+      final distance = Geolocator.distanceBetween(
+        loc.latitude,
+        loc.longitude,
+        target.lat,
+        target.lng,
+      );
+      final allowed =
+          opts.radiusM + math.min(math.max(loc.accuracy, 0), opts.accuracySlackM);
+      if (distance > allowed) {
+        await _showError(
+          'Di Luar Radius',
+          'Anda berada ${distance.round()} m dari lokasi $label '
+              '(maksimal ${allowed.round()} m). '
+              'Kunjungan hanya bisa disimpan di lokasi $label.',
+        );
+        return false;
+      }
+      return true;
+    }
+
+    // No location yet: this visit will pin it.
+    if (loc.accuracy <= 0 || loc.accuracy > opts.pinMaxAccuracyM) {
+      await _showError(
+        'Sinyal GPS Kurang Akurat',
+        'Lokasi $label belum tersimpan, dan akurasi GPS Anda '
+            '±${loc.accuracy.round()} m (maksimal ±${opts.pinMaxAccuracyM.round()} m). '
+            'Coba di luar ruangan atau dekat jendela, lalu simpan lagi.',
+      );
+      return false;
+    }
+    if (!mounted) return false;
+    return _confirm(
+      'Simpan Lokasi ${label[0].toUpperCase()}${label.substring(1)}?',
+      'Lokasi Anda saat ini akan disimpan sebagai lokasi ${_target!.label}. '
+          'Kunjungan berikutnya hanya bisa disimpan dalam radius '
+          '${opts.radiusM.round()} m dari titik ini.\n\n'
+          'Pastikan Anda sedang berada di lokasi $label.',
+      'Simpan',
+    );
+  }
+
   Future<void> _submit() async {
     setState(() {
       _targetError = _target == null
@@ -350,6 +420,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     try {
       final loc = await LocationService.getVisitLocation();
       if (!mounted) return;
+      if (!await _passesGeofence(loc) || !mounted) return;
       setState(() => _savingStep = 'Menyimpan kunjungan...');
 
       final payload = {
@@ -575,10 +646,41 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
             loading: _loadingDetails,
             onTap: _isNew ? _pickTarget : null,
           ),
+          if (_isNew && _detailsLoaded) _geofenceInfo(),
           if (!_isNew) _visitInfo(),
           if (_target != null) ..._detailFields(),
         ],
       ),
+    );
+  }
+
+  Widget _geofenceInfo() {
+    final theme = Theme.of(context);
+    final label = _targetLabel;
+    final hasLocation = _targetLocation != null;
+    final color = hasLocation ? theme.colorScheme.primary : Colors.orange.shade800;
+    final text = hasLocation
+        ? 'Kunjungan hanya bisa disimpan dalam radius '
+            '${_options!.radiusM.round()} m dari lokasi $label.'
+        : 'Lokasi $label belum tersimpan. Lokasi Anda saat menyimpan '
+            'kunjungan ini akan menjadi lokasi $label.';
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(
+          hasLocation ? Icons.my_location : Icons.info_outline,
+          size: 18,
+          color: color,
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            text,
+            style: theme.textTheme.bodySmall?.copyWith(color: color),
+          ),
+        ),
+      ],
     );
   }
 
