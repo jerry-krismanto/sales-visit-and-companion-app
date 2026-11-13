@@ -7,12 +7,14 @@ import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:uuid/uuid.dart';
+import 'package:latlong2/latlong.dart';
 
 import '../models/daily_report.dart';
 import '../models/form_options.dart';
 import '../services/erp_api.dart';
 import '../services/location_service.dart';
 import '../widgets/form_widgets.dart';
+import '../widgets/visit_map_preview.dart';
 import 'create_lead_screen.dart';
 import 'login_screen.dart';
 import 'search_picker_screen.dart';
@@ -646,7 +648,16 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
             loading: _loadingDetails,
             onTap: _isNew ? _pickTarget : null,
           ),
-          if (_isNew && _detailsLoaded) _geofenceInfo(),
+          if (_isNew && _detailsLoaded)
+            VisitMapPreview(
+              key: ValueKey(_target?.value),
+              target: _targetLocation == null
+                  ? null
+                  : LatLng(_targetLocation!.lat, _targetLocation!.lng),
+              targetLabel: _targetLabel,
+              radiusM: _options!.radiusM,
+              accuracySlackM: _options!.accuracySlackM,
+            ),
           if (!_isNew) _visitInfo(),
           if (_target != null) ..._detailFields(),
         ],
@@ -654,35 +665,35 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     );
   }
 
-  Widget _geofenceInfo() {
-    final theme = Theme.of(context);
-    final label = _targetLabel;
-    final hasLocation = _targetLocation != null;
-    final color = hasLocation ? theme.colorScheme.primary : Colors.orange.shade800;
-    final text = hasLocation
-        ? 'Kunjungan hanya bisa disimpan dalam radius '
-            '${_options!.radiusM.round()} m dari lokasi $label.'
-        : 'Lokasi $label belum tersimpan. Lokasi Anda saat menyimpan '
-            'kunjungan ini akan menjadi lokasi $label.';
+  // Widget _geofenceInfo() {
+  //   final theme = Theme.of(context);
+  //   final label = _targetLabel;
+  //   final hasLocation = _targetLocation != null;
+  //   final color = hasLocation ? theme.colorScheme.primary : Colors.orange.shade800;
+  //   final text = hasLocation
+  //       ? 'Kunjungan hanya bisa disimpan dalam radius '
+  //           '${_options!.radiusM.round()} m dari lokasi $label.'
+  //       : 'Lokasi $label belum tersimpan. Lokasi Anda saat menyimpan '
+  //           'kunjungan ini akan menjadi lokasi $label.';
 
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Icon(
-          hasLocation ? Icons.my_location : Icons.info_outline,
-          size: 18,
-          color: color,
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Text(
-            text,
-            style: theme.textTheme.bodySmall?.copyWith(color: color),
-          ),
-        ),
-      ],
-    );
-  }
+  //   return Row(
+  //     crossAxisAlignment: CrossAxisAlignment.start,
+  //     children: [
+  //       Icon(
+  //         hasLocation ? Icons.my_location : Icons.info_outline,
+  //         size: 18,
+  //         color: color,
+  //       ),
+  //       const SizedBox(width: 8),
+  //       Expanded(
+  //         child: Text(
+  //           text,
+  //           style: theme.textTheme.bodySmall?.copyWith(color: color),
+  //         ),
+  //       ),
+  //     ],
+  //   );
+  // }
 
   Widget _visitInfo() {
     final v = widget.visit!;
