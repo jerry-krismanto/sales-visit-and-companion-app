@@ -2,6 +2,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/material.dart';
 
 import '../services/erp_api.dart';
+import '../config.dart';
 import 'home_screen.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -76,6 +77,12 @@ class _LoginScreenState extends State<LoginScreen> {
                   Text('Masuk dengan akun ERPNext Anda',
                       textAlign: TextAlign.center,
                       style: theme.textTheme.bodyMedium),
+                  if (AppConfig.isStaging) ...[
+                    const SizedBox(height: 8),
+                    const Text('STAGING',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
+                  ], 
                   const SizedBox(height: 32),
                   TextFormField(
                     controller: _usrCtrl,
