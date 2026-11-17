@@ -267,7 +267,7 @@ class _VisitMapPreviewState extends State<VisitMapPreview> {
       color = Colors.green.shade700;
     } else {
       text = 'Anda ±${distance.round()} m dari lokasi $label, di luar radius '
-          '(maks ${_allowed.round()} m).';
+          '(maks ${_allowed.round()} m). Kunjungan tetap bisa disimpan dengan alasan.';
       color = Colors.red;
     }
     if (acc != null && acc > 0 && !(_pos?.isMocked ?? false)) {

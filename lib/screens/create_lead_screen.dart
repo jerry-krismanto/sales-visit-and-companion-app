@@ -26,7 +26,6 @@ class _CreateLeadScreenState extends State<CreateLeadScreen> {
     'existing_syrup',
     'existing_powder',
     'existing_coffee_machine',
-    'custom_source',
     'alamat',
   ];
 
@@ -39,7 +38,7 @@ class _CreateLeadScreenState extends State<CreateLeadScreen> {
   String? _loadError;
 
   bool _sameAsWa = true;
-  String? _territory, _hotlist, _leadGroup, _leadChannel, _priority;
+  String? _territory, _hotlist, _leadGroup, _leadChannel, _priority, _source;
   DateTime? _nextContact;
   final _errors = <String, String?>{};
   bool _saving = false;
@@ -92,6 +91,7 @@ class _CreateLeadScreenState extends State<CreateLeadScreen> {
         _leadGroup == null &&
         _leadChannel == null &&
         _priority == null &&
+        _source == null &&
         _nextContact == null;
   }
 
@@ -163,6 +163,7 @@ class _CreateLeadScreenState extends State<CreateLeadScreen> {
         'custom_lead_group': _leadGroup,
         'custom_lead_channel': _leadChannel,
         'priority': _priority,
+        'custom_source': _source,
         'next_contact_date': DateFormat('yyyy-MM-dd').format(_nextContact!),
       });
 
@@ -377,7 +378,15 @@ class _CreateLeadScreenState extends State<CreateLeadScreen> {
                 if (v != null && mounted) setState(() => _priority = v);
               },
             ),
-            _text('custom_source', 'Source Lead'),
+            PickerField(
+              label: 'Source Lead',
+              value: _source,
+              onTap: () async {
+                final v =
+                    await pickOption(context, 'Source Lead', o.leadSource, _source);
+                if (v != null && mounted) setState(() => _source = v);
+              },
+            ),
             _section('Follow Up'),
             PickerField(
               label: 'Next Contact Date *',

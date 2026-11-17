@@ -130,6 +130,9 @@ class ErpApi {
         'visit': {...fields, 'name': visitName},
       }));
 
+  Future<TodayReport> submitReport(String report) async => _report(
+      await _call('POST', '$_m.submit_report', data: {'report': report}));
+
   /// Downloads a (private) file with the session cookie.
   Future<Uint8List> getFileBytes(String fileUrl) async {
     final res = await _dio.get<List<int>>(

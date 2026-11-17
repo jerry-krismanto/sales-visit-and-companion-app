@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 
 import '../models/daily_report.dart';
 import '../services/erp_api.dart';
+import '../widgets/form_widgets.dart';
 import 'login_screen.dart';
 import 'visit_form_screen.dart';
 
@@ -14,10 +15,13 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  static final _dateFmt = DateFormat('EEEE, d MMMM y', 'id_ID');
+
   TodayReport? _today;
   String? _error;
   bool _loading = true;
   bool _formOpen = false;
+  bool _submitting = false;
 
   @override
   void initState() {
@@ -97,11 +101,68 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<void> _submitReport(String reportName, DateTime date) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Kirim laporan?'),
+        content: Text(
+          'Laporan ${_dateFmt.format(date)} akan dikirim. '
+          'Setelah dikirim, laporan tidak bisa diubah lagi.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Batal'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Kirim'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+
+    setState(() => _submitting = true);
+    try {
+      final today = await withRelogin(
+        context,
+        () => ErpApi.instance.submitReport(reportName),
+      );
+      if (!mounted) return;
+      setState(() => _today = today);
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Laporan terkirim.')));
+    } on SessionExpiredException catch (e) {
+      _goToLogin(e.message);
+    } catch (e) {
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Gagal Mengirim Laporan'),
+          content: Text(e.toString()),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final report = _today?.report;
-    final canAdd =
-        report != null && report.isEditable && _today?.openVisit == null;
+    final canAdd = report != null &&
+        report.isEditable &&
+        _today?.openVisit == null &&
+        !_submitting;
 
     return Scaffold(
       appBar: AppBar(
@@ -121,7 +182,14 @@ class _HomeScreenState extends State<HomeScreen> {
               label: const Text('Tambah Kunjungan'),
             )
           : null,
-      body: _buildBody(),
+      body: Column(
+        children: [
+          if (_submitting) const LinearProgressIndicator(),
+          Expanded(
+            child: AbsorbPointer(absorbing: _submitting, child: _buildBody()),
+          ),
+        ],
+      ),
     );
   }
 
@@ -132,121 +200,148 @@ class _HomeScreenState extends State<HomeScreen> {
     if (_today == null) {
       return _ErrorView(message: _error ?? '-', onRetry: _load);
     }
+
+    final t = _today!;
     return RefreshIndicator(
       onRefresh: _load,
-      child: _today!.report == null
-          ? _WelcomeView(today: _today!, onStart: () => _openVisitForm())
-          : _ReportView(today: _today!, onOpen: (v) => _openVisitForm(v)),
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 96), // room for the FAB
+        children: [
+          for (final p in t.pendingReports) _pendingCard(p),
+          if (t.report == null) ..._welcome(t) else ..._reportSection(t),
+        ],
+      ),
     );
   }
-}
 
-// ---------- welcome (no report yet) ----------
-
-class _WelcomeView extends StatelessWidget {
-  const _WelcomeView({required this.today, required this.onStart});
-
-  final TodayReport today;
-  final VoidCallback onStart;
-
-  @override
-  Widget build(BuildContext context) {
+  Widget _pendingCard(PendingReport p) {
     final theme = Theme.of(context);
-    final closed = DateTime.now().hour >= today.autoSubmitHour;
-
-    return ListView(
-      physics: const AlwaysScrollableScrollPhysics(),
-      padding: const EdgeInsets.all(24),
-      children: [
-        const SizedBox(height: 48),
-        Icon(Icons.storefront_outlined, size: 72, color: theme.colorScheme.primary),
-        const SizedBox(height: 24),
-        Text('Halo, ${today.employeeName}',
-            textAlign: TextAlign.center, style: theme.textTheme.headlineSmall),
-        const SizedBox(height: 8),
-        Text(DateFormat('EEEE, d MMMM y', 'id_ID').format(today.postingDate),
-            textAlign: TextAlign.center, style: theme.textTheme.bodyLarge),
-        const SizedBox(height: 32),
-        Text(
-          closed
-              ? 'Laporan hari ini sudah ditutup (pukul ${today.cutoffLabel}).'
-              : 'Belum ada kunjungan hari ini.',
-          textAlign: TextAlign.center,
-        ),
-        const SizedBox(height: 24),
-        FilledButton.icon(
-          onPressed: closed ? null : onStart,
-          icon: const Icon(Icons.play_arrow),
-          label: const Text('Mulai Laporan Hari Ini'),
-        ),
-      ],
-    );
-  }
-}
-
-// ---------- today's report ----------
-
-class _ReportView extends StatelessWidget {
-  const _ReportView({required this.today, required this.onOpen});
-
-  final TodayReport today;
-  final void Function(Visit) onOpen;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final report = today.report!;
-
-    final String statusText;
-    final Color statusColor;
-    if (report.isSubmitted) {
-      statusText = 'Terkirim';
-      statusColor = Colors.green;
-    } else if (report.isEditable) {
-      statusText = 'Draft';
-      statusColor = Colors.orange;
-    } else {
-      statusText = 'Ditutup';
-      statusColor = Colors.grey;
-    }
-
-    return ListView(
-      physics: const AlwaysScrollableScrollPhysics(),
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 96), // room for the FAB
-      children: [
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+    return Card(
+      color: Colors.orange.shade50,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
               children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        DateFormat('EEEE, d MMMM y', 'id_ID').format(today.postingDate),
-                        style: theme.textTheme.titleMedium,
-                      ),
-                    ),
-                    Chip(
-                      label: Text(statusText),
-                      labelStyle: TextStyle(color: statusColor),
-                      side: BorderSide(color: statusColor),
-                      visualDensity: VisualDensity.compact,
-                    ),
-                  ],
+                Icon(Icons.warning_amber_rounded, color: Colors.orange.shade800),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Laporan ${_dateFmt.format(p.postingDate)} belum dikirim',
+                    style: theme.textTheme.titleSmall,
+                  ),
                 ),
-                const SizedBox(height: 4),
-                Text('${report.name} · ${report.visits.length} kunjungan',
-                    style: theme.textTheme.bodySmall),
               ],
             ),
+            const SizedBox(height: 4),
+            Text(
+              '${p.visits} kunjungan'
+              '${p.hasOpenVisit ? ' · ada kunjungan yang belum check out' : ''}',
+              style: theme.textTheme.bodySmall,
+            ),
+            Align(
+              alignment: Alignment.centerRight,
+              child: FilledButton.tonal(
+                onPressed: p.hasOpenVisit
+                    ? null
+                    : () => _submitReport(p.name, p.postingDate),
+                child: const Text('Kirim'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _welcome(TodayReport t) {
+    final theme = Theme.of(context);
+    return [
+      const SizedBox(height: 32),
+      Icon(Icons.storefront_outlined, size: 72, color: theme.colorScheme.primary),
+      const SizedBox(height: 24),
+      Text('Halo, ${t.employeeName}',
+          textAlign: TextAlign.center, style: theme.textTheme.headlineSmall),
+      const SizedBox(height: 8),
+      Text(_dateFmt.format(t.postingDate),
+          textAlign: TextAlign.center, style: theme.textTheme.bodyLarge),
+      const SizedBox(height: 32),
+      const Text('Belum ada kunjungan hari ini.', textAlign: TextAlign.center),
+      const SizedBox(height: 24),
+      FilledButton.icon(
+        onPressed: () => _openVisitForm(),
+        icon: const Icon(Icons.play_arrow),
+        label: const Text('Mulai Laporan Hari Ini'),
+      ),
+    ];
+  }
+
+  List<Widget> _reportSection(TodayReport t) {
+    final theme = Theme.of(context);
+    final report = t.report!;
+    final hasOpen = t.openVisit != null;
+    final canSubmit = !report.isSubmitted && report.visits.isNotEmpty && !hasOpen;
+
+    final statusText = report.isSubmitted ? 'Terkirim' : 'Draft';
+    final statusColor = report.isSubmitted ? Colors.green : Colors.orange;
+
+    return [
+      Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      _dateFmt.format(t.postingDate),
+                      style: theme.textTheme.titleMedium,
+                    ),
+                  ),
+                  Chip(
+                    label: Text(statusText),
+                    labelStyle: TextStyle(color: statusColor),
+                    side: BorderSide(color: statusColor),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text('${report.name} · ${report.visits.length} kunjungan',
+                  style: theme.textTheme.bodySmall),
+              if (!report.isSubmitted) ...[
+                const SizedBox(height: 12),
+                if (hasOpen)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Text(
+                      'Selesaikan kunjungan yang sedang berlangsung '
+                      'sebelum mengirim laporan.',
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ),
+                FilledButton.icon(
+                  onPressed: canSubmit
+                      ? () => _submitReport(report.name, t.postingDate)
+                      : null,
+                  icon: const Icon(Icons.send),
+                  label: const Text('Kirim Laporan'),
+                ),
+              ],
+            ],
           ),
         ),
-        const SizedBox(height: 8),
-        ...report.visits.map((v) => _VisitCard(visit: v, onTap: () => onOpen(v))),
-      ],
-    );
+      ),
+      const SizedBox(height: 8),
+      ...report.visits.map(
+        (v) => _VisitCard(visit: v, onTap: () => _openVisitForm(v)),
+      ),
+    ];
   }
 }
 
@@ -295,8 +390,6 @@ class _VisitCard extends StatelessWidget {
     );
   }
 }
-
-// ---------- error ----------
 
 class _ErrorView extends StatelessWidget {
   const _ErrorView({required this.message, required this.onRetry});

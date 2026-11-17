@@ -14,10 +14,12 @@ class PickItem {
 
 class FormOptions {
   FormOptions({
+    required this.tipeKunjungan,
     required this.tujuan,
     required this.priority,
     required this.kota,
     required this.hotlist,
+    required this.leadSource,
     required this.leadGroup,
     required this.leadChannel,
     required this.radiusM,
@@ -27,10 +29,12 @@ class FormOptions {
     required this.minPhotosCheckOut,
   });
 
+  final List<String> tipeKunjungan;
   final List<String> tujuan;
   final List<String> priority;
   final List<String> kota;
   final List<String> hotlist;
+  final List<String> leadSource;
   final List<String> leadGroup;
   final List<String> leadChannel;
 
@@ -52,10 +56,12 @@ class FormOptions {
     final photos = Map<String, dynamic>.from(j['photos'] as Map? ?? {});
 
     return FormOptions(
+      tipeKunjungan: list('tipe_kunjungan'),
       tujuan: list('tujuan_berkunjung'),
       priority: list('priority'),
       kota: list('kota'),
       hotlist: list('hotlist'),
+      leadSource: list('lead_source'),
       leadGroup: list('lead_group'),
       leadChannel: list('lead_channel'),
       radiusM: numOr('radius_m', 100),

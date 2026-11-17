@@ -74,14 +74,15 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
   Visit? _visit; // null until checked in
   String _jenis = 'Existing';
   PickItem? _target;
+  String? _group; // customer/lead group, read-only
   bool _loadingDetails = false;
   bool _detailsLoaded = false;
   ({double lat, double lng})? _targetLocation;
-  String? _tujuan, _priority, _kota;
+  String? _tipe, _tujuan, _priority, _kota;
   XFile? _checkInPhoto;
   final _photoCache = <String, Future<Uint8List>>{};
   int? _busySlot;
-  String? _targetError, _tujuanError, _photoError;
+  String? _targetError, _tipeError, _tujuanError, _photoError;
   Map<String, String?> _initial = const {};
 
   bool _saving = false;
@@ -131,9 +132,11 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
       value: (v.isExisting ? v.data['nama_customer'] : v.data['nama_lead']) ?? '',
       label: v.title,
     );
+    _group = v.group;
     for (final f in [..._commonText, ..._typeText]) {
       _ctrl[f]!.text = v.data[f]?.toString() ?? '';
     }
+    _tipe = v.data['tipe_kunjungan'];
     _tujuan = v.data['tujuan_berkunjung'];
     _kota = v.data['kota'];
     _priority = v.data['priority'];
@@ -186,6 +189,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
 
   Map<String, String?> _snapshot() => {
         for (final f in [..._commonText, ..._typeText]) f: _ctrl[f]!.text.trim(),
+        'tipe_kunjungan': _tipe,
         'tujuan_berkunjung': _tujuan,
         'kota': _kota,
         'priority': _priority,
@@ -286,6 +290,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     setState(() {
       _jenis = jenis;
       _target = null;
+      _group = null;
       _targetError = null;
       _detailsLoaded = false;
       _targetLocation = null;
@@ -318,6 +323,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
 
     setState(() {
       _target = item;
+      _group = null;
       _targetError = null;
       _detailsLoaded = false;
       _targetLocation = null;
@@ -345,11 +351,11 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
   }
 
   void _applyDetails(Map<String, dynamic> d) {
-    debugPrint('DETAILS ${_target?.value}: lokasi=${d['lokasi']}');
     setState(() {
       for (final f in [..._typeText, 'alamat']) {
         _ctrl[f]!.text = d[f]?.toString() ?? '';
       }
+      _group = (_isExisting ? d['customer_group'] : d['lead_group'])?.toString();
       final kota = d['kota'];
       _kota = (kota != null && _options!.kota.contains(kota)) ? kota : null;
       if (!_isExisting) {
@@ -450,6 +456,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
           'nama_customer': _target!.value
         else
           'nama_lead': _target!.value,
+        'tipe_kunjungan': _tipe,
         'tujuan_berkunjung': _tujuan,
         'kota': _kota,
         if (!_isExisting) 'priority': _priority,
@@ -458,6 +465,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
       };
 
   Map<String, dynamic> _editableFields() => {
+        'tipe_kunjungan': _tipe,
         'tujuan_berkunjung': _tujuan,
         'kota': _kota,
         if (!_isExisting) 'priority': _priority,
@@ -467,8 +475,10 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
 
   // ---------- geofence (phone-side precheck; the server repeats it) ----------
 
-  Future<bool> _passesGeofence(VisitLocation loc, {bool checkOut = false}) async {
-    if (!_detailsLoaded) return true; // let the server decide
+  /// Returns null to cancel, '' when no reason is needed, or the rep's reason
+  /// for being outside the radius.
+  Future<String?> _geofenceCheck(VisitLocation loc, {bool checkOut = false}) async {
+    if (!_detailsLoaded) return ''; // let the server decide
     final opts = _options!;
     final label = _targetLabel;
     final target = _targetLocation;
@@ -482,20 +492,21 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
       );
       final allowed =
           opts.radiusM + math.min(math.max(loc.accuracy, 0), opts.accuracySlackM);
-      if (distance > allowed) {
-        await _showError(
-          'Di Luar Radius',
-          'Anda berada ${distance.round()} m dari lokasi $label '
-              '(maksimal ${allowed.round()} m). '
-              '${checkOut ? 'Check out' : 'Check in'} hanya bisa dilakukan '
-              'di lokasi $label.',
-        );
-        return false;
-      }
-      return true;
+      if (distance <= allowed) return '';
+      if (!mounted) return null;
+      return showDialog<String>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => _OutsideRadiusDialog(
+          distance: distance,
+          allowed: allowed,
+          label: label,
+          checkOut: checkOut,
+        ),
+      );
     }
 
-    if (checkOut) return true; // nothing to compare against
+    if (checkOut) return ''; // nothing to compare against
 
     // No location yet: this check in will pin it.
     if (loc.accuracy <= 0 || loc.accuracy > opts.pinMaxAccuracyM) {
@@ -505,17 +516,18 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
             '±${loc.accuracy.round()} m (maksimal ±${opts.pinMaxAccuracyM.round()} m). '
             'Coba di luar ruangan atau dekat jendela, lalu coba lagi.',
       );
-      return false;
+      return null;
     }
-    if (!mounted) return false;
-    return _confirm(
+    if (!mounted) return null;
+    final ok = await _confirm(
       'Simpan Lokasi ${label[0].toUpperCase()}${label.substring(1)}?',
       'Lokasi Anda saat ini akan disimpan sebagai lokasi ${_target!.label}. '
-          'Kunjungan berikutnya hanya bisa disimpan dalam radius '
-          '${opts.radiusM.round()} m dari titik ini.\n\n'
+          'Kunjungan berikutnya akan dibandingkan dengan titik ini '
+          '(radius ${opts.radiusM.round()} m).\n\n'
           'Pastikan Anda sedang berada di lokasi $label.',
       'Simpan',
     );
+    return ok ? '' : null;
   }
 
   // ---------- check in ----------
@@ -525,10 +537,14 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
       _targetError = _target == null
           ? (_isExisting ? 'Pilih customer' : 'Pilih lead')
           : null;
+      _tipeError = _tipe == null ? 'Pilih tipe kunjungan' : null;
       _tujuanError = _tujuan == null ? 'Pilih tujuan berkunjung' : null;
       _photoError = _checkInPhoto == null ? 'Foto check in wajib diambil' : null;
     });
-    if (_targetError != null || _tujuanError != null || _photoError != null) {
+    if (_targetError != null ||
+        _tipeError != null ||
+        _tujuanError != null ||
+        _photoError != null) {
       return;
     }
 
@@ -539,7 +555,8 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     try {
       final loc = await LocationService.getVisitLocation();
       if (!mounted) return;
-      if (!await _passesGeofence(loc) || !mounted) return;
+      final reason = await _geofenceCheck(loc);
+      if (reason == null || !mounted) return;
       setState(() => _savingStep = 'Check in...');
 
       final payload = {
@@ -550,6 +567,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
         'gps_accuracy': loc.accuracy,
         'is_mock_location': loc.isMocked ? 1 : 0,
         'device_rooted': loc.deviceRooted ? 1 : 0,
+        if (reason.isNotEmpty) 'alasan_luar_radius': reason,
       };
 
       final report = await _withRelogin(
@@ -591,12 +609,13 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     final count = _visit!.photoCount;
     final min = _options!.minPhotosCheckOut;
     setState(() {
+      _tipeError = _tipe == null ? 'Pilih tipe kunjungan' : null;
       _tujuanError = _tujuan == null ? 'Pilih tujuan berkunjung' : null;
       _photoError = count < min
           ? 'Minimal $min foto sebelum check out (sekarang $count).'
           : null;
     });
-    if (_tujuanError != null || _photoError != null) return;
+    if (_tipeError != null || _tujuanError != null || _photoError != null) return;
 
     setState(() {
       _saving = true;
@@ -605,7 +624,8 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     try {
       final loc = await LocationService.getVisitLocation();
       if (!mounted) return;
-      if (!await _passesGeofence(loc, checkOut: true) || !mounted) return;
+      final reason = await _geofenceCheck(loc, checkOut: true);
+      if (reason == null || !mounted) return;
       setState(() => _savingStep = 'Check out...');
 
       final fields = {
@@ -614,6 +634,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
         'longitude': loc.longitude,
         'gps_accuracy': loc.accuracy,
         'is_mock_location': loc.isMocked ? 1 : 0,
+        if (reason.isNotEmpty) 'alasan_luar_radius': reason,
       };
       final report = await _withRelogin(
         () => ErpApi.instance.checkOutVisit(_visit!.name, fields),
@@ -641,9 +662,10 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
 
   Future<void> _saveChanges() async {
     setState(() {
+      _tipeError = _tipe == null ? 'Pilih tipe kunjungan' : null;
       _tujuanError = _tujuan == null ? 'Pilih tujuan berkunjung' : null;
     });
-    if (_tujuanError != null) return;
+    if (_tipeError != null || _tujuanError != null) return;
 
     setState(() {
       _saving = true;
@@ -864,6 +886,12 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
             loading: _loadingDetails,
             onTap: _isNew ? _pickTarget : null,
           ),
+          if (_target != null)
+            PickerField(
+              label: _isExisting ? 'Customer Group' : 'Lead Group',
+              value: _group,
+              onTap: null, // read-only
+            ),
           if (!_isNew) _visitInfo(),
           if (showMap) ...[
             const SizedBox(height: 8),
@@ -912,6 +940,20 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
       _section(_photoTitle()),
       _isNew ? _checkInPhotoField() : _photoGrid(),
       _section('Kunjungan'),
+      PickerField(
+        label: 'Tipe Kunjungan *',
+        value: _tipe,
+        errorText: _tipeError,
+        onTap: () async {
+          final v = await pickOption(context, 'Tipe Kunjungan', o.tipeKunjungan, _tipe);
+          if (v != null && mounted) {
+            setState(() {
+              _tipe = v;
+              _tipeError = null;
+            });
+          }
+        },
+      ),
       PickerField(
         label: 'Tujuan Berkunjung *',
         value: _tujuan,
@@ -1176,6 +1218,86 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
           border: const OutlineInputBorder(),
         ),
       ),
+    );
+  }
+}
+
+/// Outside the radius: explain, ask for a reason. Pops the reason, or null to cancel.
+class _OutsideRadiusDialog extends StatefulWidget {
+  const _OutsideRadiusDialog({
+    required this.distance,
+    required this.allowed,
+    required this.label,
+    required this.checkOut,
+  });
+
+  final double distance;
+  final double allowed;
+  final String label;
+  final bool checkOut;
+
+  @override
+  State<_OutsideRadiusDialog> createState() => _OutsideRadiusDialogState();
+}
+
+class _OutsideRadiusDialogState extends State<_OutsideRadiusDialog> {
+  final _reason = TextEditingController();
+  String? _error;
+
+  @override
+  void dispose() {
+    _reason.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final text = _reason.text.trim();
+    if (text.isEmpty) {
+      setState(() => _error = 'Alasan wajib diisi');
+      return;
+    }
+    Navigator.pop(context, text);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final action = widget.checkOut ? 'Check out' : 'Check in';
+    return AlertDialog(
+      title: const Text('Di Luar Radius'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Anda berada ${widget.distance.round()} m dari lokasi ${widget.label} '
+              '(maksimal ${widget.allowed.round()} m). $action tetap bisa '
+              'dilakukan, tapi akan ditandai untuk dicek supervisor.',
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _reason,
+              autofocus: true,
+              minLines: 1,
+              maxLines: 3,
+              textCapitalization: TextCapitalization.sentences,
+              decoration: InputDecoration(
+                labelText: 'Alasan *',
+                hintText: 'Contoh: meeting di cafe lain',
+                errorText: _error,
+                border: const OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Batal'),
+        ),
+        FilledButton(onPressed: _submit, child: const Text('Lanjutkan')),
+      ],
     );
   }
 }

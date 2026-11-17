@@ -3,33 +3,35 @@ class TodayReport {
     required this.salesPerson,
     required this.employeeName,
     required this.postingDate,
-    required this.autoSubmitHour,
     this.report,
     this.openVisit,
+    this.pendingReports = const [],
   });
 
   final String salesPerson;
   final String employeeName;
   final DateTime postingDate;
-  final int autoSubmitHour;
   final DailyReport? report;
 
   /// Checked in but not checked out yet (may belong to an earlier day's report).
   final OpenVisit? openVisit;
 
-  String get cutoffLabel => '${autoSubmitHour.toString().padLeft(2, '0')}:00';
+  /// Earlier days' drafts that were never submitted.
+  final List<PendingReport> pendingReports;
 
   factory TodayReport.fromJson(Map<String, dynamic> j) => TodayReport(
         salesPerson: j['sales_person'] ?? '',
         employeeName: j['employee_name'] ?? '',
         postingDate: DateTime.parse(j['posting_date'].toString()),
-        autoSubmitHour: (j['auto_submit_hour'] as num?)?.toInt() ?? 18,
         report: j['report'] == null
             ? null
             : DailyReport.fromJson(Map<String, dynamic>.from(j['report'])),
         openVisit: j['open_visit'] == null
             ? null
             : OpenVisit.fromJson(Map<String, dynamic>.from(j['open_visit'])),
+        pendingReports: (j['pending_reports'] as List? ?? [])
+            .map((p) => PendingReport.fromJson(Map<String, dynamic>.from(p)))
+            .toList(),
       );
 }
 
@@ -44,6 +46,27 @@ class OpenVisit {
         report: j['report'],
         postingDate: DateTime.parse(j['posting_date'].toString()),
         visit: Visit(Map<String, dynamic>.from(j['visit'])),
+      );
+}
+
+class PendingReport {
+  PendingReport({
+    required this.name,
+    required this.postingDate,
+    required this.visits,
+    required this.hasOpenVisit,
+  });
+
+  final String name;
+  final DateTime postingDate;
+  final int visits;
+  final bool hasOpenVisit;
+
+  factory PendingReport.fromJson(Map<String, dynamic> j) => PendingReport(
+        name: j['name'],
+        postingDate: DateTime.parse(j['posting_date'].toString()),
+        visits: (j['visits'] as num?)?.toInt() ?? 0,
+        hasOpenVisit: j['has_open_visit'] == true,
       );
 }
 
@@ -97,6 +120,8 @@ class Visit {
 
   String? get tujuan => data['tujuan_berkunjung'];
   String? get kota => data['kota'];
+  String? get group =>
+      (isExisting ? data['customer_group'] : data['lead_group'])?.toString();
 
   DateTime? _dt(String key) {
     final raw = data[key];
