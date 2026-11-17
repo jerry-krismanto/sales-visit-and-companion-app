@@ -31,7 +31,6 @@ class ErpApi {
 
   late final Dio _dio;
   late final PersistCookieJar _cookieJar;
-
   FormOptions? _formOptions;
 
   Future<void> init() async {
@@ -85,41 +84,51 @@ class ErpApi {
     }
   }
 
-  // ---------- daily report ----------
+  // ---------- daily report & visits ----------
 
-  Future<TodayReport> getTodayReport() async {
-    final data = await _call('GET', '$_m.get_today_report');
-    return TodayReport.fromJson(Map<String, dynamic>.from(data));
-  }
+  Future<TodayReport> getTodayReport() async =>
+      _report(await _call('GET', '$_m.get_today_report'));
 
-  Future<TodayReport> addVisit(
-      Map<String, dynamic> visit, String photoPath) async {
-    final isPng = photoPath.toLowerCase().endsWith('.png');
+  /// Check in.
+  Future<TodayReport> addVisit(Map<String, dynamic> visit, String photoPath) async {
     final form = FormData.fromMap({
       'visit': jsonEncode(visit),
-      'photo': await MultipartFile.fromFile(
-        photoPath,
-        filename: isPng ? 'kunjungan.png' : 'kunjungan.jpg',
-        contentType: DioMediaType('image', isPng ? 'png' : 'jpeg'),
-      ),
+      'photo': await _photoPart(photoPath),
     });
-    final data = await _call('POST', '$_m.add_visit', data: form);
-    return TodayReport.fromJson(Map<String, dynamic>.from(data));
+    return _report(await _call('POST', '$_m.add_visit', data: form));
   }
 
-    Future<TodayReport> updateVisit(
-      String name, Map<String, dynamic> fields) async {
-    final data = await _call('POST', '$_m.update_visit', data: {
-      'visit': {...fields, 'name': name},
+  Future<TodayReport> updateVisit(String name, Map<String, dynamic> fields) async =>
+      _report(await _call('POST', '$_m.update_visit', data: {
+        'visit': {...fields, 'name': name},
+      }));
+
+  Future<TodayReport> deleteVisit(String name) async => _report(
+      await _call('POST', '$_m.delete_visit', data: {'visit_name': name}));
+
+  /// Add or replace photo [slot] (1-3) of the open visit.
+  Future<TodayReport> uploadVisitPhoto(
+      String visitName, int slot, String photoPath) async {
+    final form = FormData.fromMap({
+      'visit_name': visitName,
+      'slot': slot,
+      'photo': await _photoPart(photoPath),
     });
-    return TodayReport.fromJson(Map<String, dynamic>.from(data));
+    return _report(await _call('POST', '$_m.upload_visit_photo', data: form));
   }
 
-  Future<TodayReport> deleteVisit(String name) async {
-    final data =
-        await _call('POST', '$_m.delete_visit', data: {'visit_name': name});
-    return TodayReport.fromJson(Map<String, dynamic>.from(data));
-  }
+  Future<TodayReport> deleteVisitPhoto(String visitName, int slot) async =>
+      _report(await _call('POST', '$_m.delete_visit_photo', data: {
+        'visit_name': visitName,
+        'slot': slot,
+      }));
+
+  /// Check out: [fields] holds detail edits plus GPS.
+  Future<TodayReport> checkOutVisit(
+          String visitName, Map<String, dynamic> fields) async =>
+      _report(await _call('POST', '$_m.check_out_visit', data: {
+        'visit': {...fields, 'name': visitName},
+      }));
 
   /// Downloads a (private) file with the session cookie.
   Future<Uint8List> getFileBytes(String fileUrl) async {
@@ -172,6 +181,18 @@ class ErpApi {
   }
 
   // ---------- internals ----------
+
+  TodayReport _report(dynamic data) =>
+      TodayReport.fromJson(Map<String, dynamic>.from(data));
+
+  Future<MultipartFile> _photoPart(String path) {
+    final isPng = path.toLowerCase().endsWith('.png');
+    return MultipartFile.fromFile(
+      path,
+      filename: isPng ? 'kunjungan.png' : 'kunjungan.jpg',
+      contentType: DioMediaType('image', isPng ? 'png' : 'jpeg'),
+    );
+  }
 
   Future<dynamic> _call(
     String method,

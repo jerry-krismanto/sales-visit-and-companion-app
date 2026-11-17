@@ -6,8 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
-import 'package:uuid/uuid.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:uuid/uuid.dart';
 
 import '../models/daily_report.dart';
 import '../models/form_options.dart';
@@ -26,11 +26,15 @@ class VisitFormResult {
   final String message;
 }
 
+enum _Mode { create, open, edit, view }
+
 class VisitFormScreen extends StatefulWidget {
   const VisitFormScreen({super.key, this.visit, this.readOnly = false});
 
-  /// null = new visit; otherwise view/edit an existing one.
+  /// null = new visit (check in); otherwise an existing one.
   final Visit? visit;
+
+  /// Only applies to checked-out visits; an open visit is always editable.
   final bool readOnly;
 
   @override
@@ -61,27 +65,38 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
       f: TextEditingController(),
   };
 
-  /// Same ID for every retry of this form, so the server can de-duplicate.
+  /// Same ID for every retry of this check in, so the server can de-duplicate.
   final _clientVisitId = const Uuid().v4();
 
   FormOptions? _options;
   String? _loadError;
 
+  Visit? _visit; // null until checked in
   String _jenis = 'Existing';
   PickItem? _target;
   bool _loadingDetails = false;
   bool _detailsLoaded = false;
   ({double lat, double lng})? _targetLocation;
   String? _tujuan, _priority, _kota;
-  XFile? _photo;
-  Future<Uint8List>? _savedPhoto;
+  XFile? _checkInPhoto;
+  final _photoCache = <String, Future<Uint8List>>{};
+  int? _busySlot;
   String? _targetError, _tujuanError, _photoError;
   Map<String, String?> _initial = const {};
 
   bool _saving = false;
   String _savingStep = '';
 
-  bool get _isNew => widget.visit == null;
+  _Mode get _mode {
+    final v = _visit;
+    if (v == null) return _Mode.create;
+    if (v.isOpen) return _Mode.open;
+    return widget.readOnly ? _Mode.view : _Mode.edit;
+  }
+
+  bool get _isNew => _mode == _Mode.create;
+  bool get _isOpen => _mode == _Mode.open;
+  bool get _isView => _mode == _Mode.view;
   bool get _isExisting => _jenis == 'Existing';
   String get _targetLabel => _isExisting ? 'customer' : 'lead';
   List<String> get _typeText => _isExisting ? _existingText : _leadText;
@@ -91,23 +106,11 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     super.initState();
     final v = widget.visit;
     if (v != null) {
-      _jenis = v.isExisting ? 'Existing' : 'New Lead';
-      _target = PickItem(
-        value: (v.isExisting ? v.data['nama_customer'] : v.data['nama_lead']) ?? '',
-        label: v.title,
-      );
-      for (final f in [..._commonText, ..._typeText]) {
-        _ctrl[f]!.text = v.data[f]?.toString() ?? '';
+      _loadVisit(v);
+      if (v.isOpen) {
+        WidgetsBinding.instance
+            .addPostFrameCallback((_) => _loadTargetLocation());
       }
-      _tujuan = v.data['tujuan_berkunjung'];
-      _kota = v.data['kota'];
-      _priority = v.data['priority'];
-
-      final shot = v.data['screenshot'];
-      if (shot is String && shot.isNotEmpty) {
-        _savedPhoto = ErpApi.instance.getFileBytes(shot);
-      }
-      _initial = _snapshot();
     }
     _loadOptions();
   }
@@ -120,6 +123,23 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     super.dispose();
   }
 
+  /// Fills the form from a saved visit (no setState; call inside one if needed).
+  void _loadVisit(Visit v) {
+    _visit = v;
+    _jenis = v.isExisting ? 'Existing' : 'New Lead';
+    _target = PickItem(
+      value: (v.isExisting ? v.data['nama_customer'] : v.data['nama_lead']) ?? '',
+      label: v.title,
+    );
+    for (final f in [..._commonText, ..._typeText]) {
+      _ctrl[f]!.text = v.data[f]?.toString() ?? '';
+    }
+    _tujuan = v.data['tujuan_berkunjung'];
+    _kota = v.data['kota'];
+    _priority = v.data['priority'];
+    _initial = _snapshot();
+  }
+
   Future<void> _loadOptions() async {
     setState(() => _loadError = null);
     try {
@@ -130,6 +150,38 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     } catch (e) {
       if (mounted) setState(() => _loadError = e.toString());
     }
+  }
+
+  /// Open visit: fetch the customer/lead pin for the map and the check-out precheck.
+  Future<void> _loadTargetLocation() async {
+    final v = _visit;
+    if (v == null) return;
+    try {
+      final d = await _withRelogin(() => v.isExisting
+          ? ErpApi.instance.getCustomerDetails(v.data['nama_customer'])
+          : ErpApi.instance.getLeadDetails(v.data['nama_lead']));
+      if (!mounted) return;
+      setState(() {
+        _targetLocation = _parseLokasi(d['lokasi']);
+        _detailsLoaded = true;
+      });
+    } on SessionExpiredException catch (e) {
+      _sessionExpired(e);
+    } catch (_) {
+      // no map then; the server still checks the radius at check out
+    }
+  }
+
+  ({double lat, double lng})? _parseLokasi(dynamic lokasi) {
+    if (lokasi is Map &&
+        lokasi['latitude'] is num &&
+        lokasi['longitude'] is num) {
+      return (
+        lat: (lokasi['latitude'] as num).toDouble(),
+        lng: (lokasi['longitude'] as num).toDouble(),
+      );
+    }
+    return null;
   }
 
   Map<String, String?> _snapshot() => {
@@ -216,7 +268,18 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     return ok == true;
   }
 
-  // ---------- selection ----------
+  /// After a photo/save call on the open visit: refresh it, or leave if it's no longer open.
+  void _applyOpenVisit(TodayReport r) {
+    final ov = r.openVisit;
+    if (ov != null && ov.visit.name == _visit?.name) {
+      setState(() => _visit = ov.visit);
+    } else {
+      Navigator.of(context)
+          .pop(VisitFormResult(r, 'Kunjungan sudah tidak berlangsung.'));
+    }
+  }
+
+  // ---------- selection (before check in) ----------
 
   void _switchJenis(String jenis) {
     if (jenis == _jenis) return;
@@ -282,6 +345,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
   }
 
   void _applyDetails(Map<String, dynamic> d) {
+    debugPrint('DETAILS ${_target?.value}: lokasi=${d['lokasi']}');
     setState(() {
       for (final f in [..._typeText, 'alamat']) {
         _ctrl[f]!.text = d[f]?.toString() ?? '';
@@ -292,16 +356,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
         final p = d['priority'];
         _priority = (p != null && _options!.priority.contains(p)) ? p : null;
       }
-
-      final lokasi = d['lokasi'];
-      _targetLocation = (lokasi is Map &&
-              lokasi['latitude'] is num &&
-              lokasi['longitude'] is num)
-          ? (
-              lat: (lokasi['latitude'] as num).toDouble(),
-              lng: (lokasi['longitude'] as num).toDouble(),
-            )
-          : null;
+      _targetLocation = _parseLokasi(d['lokasi']);
       _detailsLoaded = true;
     });
   }
@@ -318,29 +373,78 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     if (item != null && mounted) setState(() => _kota = item.value);
   }
 
-  Future<void> _takePhoto() async {
+  // ---------- photos ----------
+
+  Future<XFile?> _capturePhoto() async {
     try {
-      final photo = await ImagePicker().pickImage(
+      return await ImagePicker().pickImage(
         source: ImageSource.camera,
         preferredCameraDevice: CameraDevice.rear,
         imageQuality: 70,
         maxWidth: 1600,
         maxHeight: 1600,
       );
-      if (photo != null && mounted) {
-        setState(() {
-          _photo = photo;
-          _photoError = null;
-        });
-      }
     } catch (e) {
       if (mounted) _showSnack('Kamera tidak dapat dibuka: $e');
+      return null;
     }
   }
 
-  // ---------- new visit ----------
+  Future<void> _takeCheckInPhoto() async {
+    final photo = await _capturePhoto();
+    if (photo != null && mounted) {
+      setState(() {
+        _checkInPhoto = photo;
+        _photoError = null;
+      });
+    }
+  }
 
-  Map<String, dynamic> _buildPayload() => {
+  Future<void> _uploadPhoto(int slot) async {
+    final photo = await _capturePhoto();
+    if (photo == null || !mounted) return;
+
+    setState(() {
+      _busySlot = slot;
+      _photoError = null;
+    });
+    try {
+      final r = await _withRelogin(
+        () => ErpApi.instance.uploadVisitPhoto(_visit!.name, slot, photo.path),
+      );
+      if (mounted) _applyOpenVisit(r);
+    } on SessionExpiredException catch (e) {
+      _sessionExpired(e);
+    } catch (e) {
+      if (mounted) await _showError('Gagal Mengunggah Foto', e.toString());
+    } finally {
+      if (mounted) setState(() => _busySlot = null);
+    }
+  }
+
+  Future<void> _deletePhoto(int slot) async {
+    final ok = await _confirm(
+        'Hapus foto?', 'Foto ini akan dihapus dari kunjungan.', 'Hapus');
+    if (!ok || !mounted) return;
+
+    setState(() => _busySlot = slot);
+    try {
+      final r = await _withRelogin(
+        () => ErpApi.instance.deleteVisitPhoto(_visit!.name, slot),
+      );
+      if (mounted) _applyOpenVisit(r);
+    } on SessionExpiredException catch (e) {
+      _sessionExpired(e);
+    } catch (e) {
+      if (mounted) await _showError('Gagal Menghapus Foto', e.toString());
+    } finally {
+      if (mounted) setState(() => _busySlot = null);
+    }
+  }
+
+  // ---------- payloads ----------
+
+  Map<String, dynamic> _buildCheckInPayload() => {
         'jenis_kunjungan': _jenis,
         if (_isExisting)
           'nama_customer': _target!.value
@@ -353,9 +457,17 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
           f: _ctrl[f]!.text.trim(),
       };
 
-  /// Phone-side geofence check. Returns false if the visit must not be sent.
-  /// The server repeats the same check; this just gives a faster, clearer answer.
-  Future<bool> _passesGeofence(VisitLocation loc) async {
+  Map<String, dynamic> _editableFields() => {
+        'tujuan_berkunjung': _tujuan,
+        'kota': _kota,
+        if (!_isExisting) 'priority': _priority,
+        for (final f in [..._commonText, ..._typeText])
+          f: _ctrl[f]!.text.trim(),
+      };
+
+  // ---------- geofence (phone-side precheck; the server repeats it) ----------
+
+  Future<bool> _passesGeofence(VisitLocation loc, {bool checkOut = false}) async {
     if (!_detailsLoaded) return true; // let the server decide
     final opts = _options!;
     final label = _targetLabel;
@@ -375,20 +487,23 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
           'Di Luar Radius',
           'Anda berada ${distance.round()} m dari lokasi $label '
               '(maksimal ${allowed.round()} m). '
-              'Kunjungan hanya bisa disimpan di lokasi $label.',
+              '${checkOut ? 'Check out' : 'Check in'} hanya bisa dilakukan '
+              'di lokasi $label.',
         );
         return false;
       }
       return true;
     }
 
-    // No location yet: this visit will pin it.
+    if (checkOut) return true; // nothing to compare against
+
+    // No location yet: this check in will pin it.
     if (loc.accuracy <= 0 || loc.accuracy > opts.pinMaxAccuracyM) {
       await _showError(
         'Sinyal GPS Kurang Akurat',
         'Lokasi $label belum tersimpan, dan akurasi GPS Anda '
             '±${loc.accuracy.round()} m (maksimal ±${opts.pinMaxAccuracyM.round()} m). '
-            'Coba di luar ruangan atau dekat jendela, lalu simpan lagi.',
+            'Coba di luar ruangan atau dekat jendela, lalu coba lagi.',
       );
       return false;
     }
@@ -403,13 +518,15 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     );
   }
 
-  Future<void> _submit() async {
+  // ---------- check in ----------
+
+  Future<void> _checkIn() async {
     setState(() {
       _targetError = _target == null
           ? (_isExisting ? 'Pilih customer' : 'Pilih lead')
           : null;
       _tujuanError = _tujuan == null ? 'Pilih tujuan berkunjung' : null;
-      _photoError = _photo == null ? 'Foto kunjungan wajib diambil' : null;
+      _photoError = _checkInPhoto == null ? 'Foto check in wajib diambil' : null;
     });
     if (_targetError != null || _tujuanError != null || _photoError != null) {
       return;
@@ -423,26 +540,35 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
       final loc = await LocationService.getVisitLocation();
       if (!mounted) return;
       if (!await _passesGeofence(loc) || !mounted) return;
-      setState(() => _savingStep = 'Menyimpan kunjungan...');
+      setState(() => _savingStep = 'Check in...');
 
       final payload = {
-        ..._buildPayload(),
+        ..._buildCheckInPayload(),
         'client_visit_id': _clientVisitId,
         'latitude': loc.latitude,
         'longitude': loc.longitude,
         'gps_accuracy': loc.accuracy,
-        'is_mock_location': 0,
+        'is_mock_location': loc.isMocked ? 1 : 0,
         'device_rooted': loc.deviceRooted ? 1 : 0,
       };
 
       final report = await _withRelogin(
-        () => ErpApi.instance.addVisit(payload, _photo!.path),
+        () => ErpApi.instance.addVisit(payload, _checkInPhoto!.path),
       );
-      if (mounted) {
-        Navigator.of(context).pop(VisitFormResult(report, 'Kunjungan tersimpan.'));
+      if (!mounted) return;
+
+      final ov = report.openVisit;
+      if (ov == null) {
+        Navigator.of(context).pop(VisitFormResult(report, 'Check in berhasil.'));
+        return;
       }
-    } on MockLocationException catch (e) {
-      await _showError('Fake GPS Terdeteksi', e.message);
+      setState(() {
+        _loadVisit(ov.visit); // switch to the open-visit screen
+        _checkInPhoto = null;
+        _targetLocation ??= (lat: loc.latitude, lng: loc.longitude); // just pinned
+        _detailsLoaded = true;
+      });
+      _showSnack('Check in berhasil. Tambahkan foto, lalu tekan Check Out saat selesai.');
     } on LocationException catch (e) {
       await _showError(
         'Lokasi Tidak Tersedia',
@@ -453,13 +579,65 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     } on SessionExpiredException catch (e) {
       _sessionExpired(e);
     } catch (e) {
-      await _showError('Gagal Menyimpan', e.toString());
+      if (mounted) await _showError('Gagal Check In', e.toString());
     } finally {
       if (mounted) setState(() => _saving = false);
     }
   }
 
-  // ---------- edit / delete ----------
+  // ---------- check out ----------
+
+  Future<void> _checkOut() async {
+    final count = _visit!.photoCount;
+    final min = _options!.minPhotosCheckOut;
+    setState(() {
+      _tujuanError = _tujuan == null ? 'Pilih tujuan berkunjung' : null;
+      _photoError = count < min
+          ? 'Minimal $min foto sebelum check out (sekarang $count).'
+          : null;
+    });
+    if (_tujuanError != null || _photoError != null) return;
+
+    setState(() {
+      _saving = true;
+      _savingStep = 'Mengambil lokasi...';
+    });
+    try {
+      final loc = await LocationService.getVisitLocation();
+      if (!mounted) return;
+      if (!await _passesGeofence(loc, checkOut: true) || !mounted) return;
+      setState(() => _savingStep = 'Check out...');
+
+      final fields = {
+        ..._editableFields(),
+        'latitude': loc.latitude,
+        'longitude': loc.longitude,
+        'gps_accuracy': loc.accuracy,
+        'is_mock_location': loc.isMocked ? 1 : 0,
+      };
+      final report = await _withRelogin(
+        () => ErpApi.instance.checkOutVisit(_visit!.name, fields),
+      );
+      if (mounted) {
+        Navigator.of(context).pop(VisitFormResult(report, 'Check out berhasil.'));
+      }
+    } on LocationException catch (e) {
+      await _showError(
+        'Lokasi Tidak Tersedia',
+        e.message,
+        actionLabel: e.fixLabel,
+        action: e.fix,
+      );
+    } on SessionExpiredException catch (e) {
+      _sessionExpired(e);
+    } catch (e) {
+      if (mounted) await _showError('Gagal Check Out', e.toString());
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  // ---------- save / delete ----------
 
   Future<void> _saveChanges() async {
     setState(() {
@@ -469,26 +647,26 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
 
     setState(() {
       _saving = true;
-      _savingStep = 'Menyimpan perubahan...';
+      _savingStep = 'Menyimpan...';
     });
     try {
-      final fields = <String, dynamic>{
-        'tujuan_berkunjung': _tujuan,
-        'kota': _kota,
-        if (!_isExisting) 'priority': _priority,
-        for (final f in [..._commonText, ..._typeText])
-          f: _ctrl[f]!.text.trim(),
-      };
       final report = await _withRelogin(
-        () => ErpApi.instance.updateVisit(widget.visit!.name, fields),
+        () => ErpApi.instance.updateVisit(_visit!.name, _editableFields()),
       );
-      if (mounted) {
+      if (!mounted) return;
+      if (_isOpen) {
+        _applyOpenVisit(report);
+        if (mounted) {
+          setState(() => _initial = _snapshot());
+          _showSnack('Perubahan tersimpan.');
+        }
+      } else {
         Navigator.of(context).pop(VisitFormResult(report, 'Perubahan tersimpan.'));
       }
     } on SessionExpiredException catch (e) {
       _sessionExpired(e);
     } catch (e) {
-      await _showError('Gagal Menyimpan', e.toString());
+      if (mounted) await _showError('Gagal Menyimpan', e.toString());
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -497,7 +675,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
   Future<void> _delete() async {
     final ok = await _confirm(
       'Hapus kunjungan?',
-      'Kunjungan ke ${widget.visit!.title} akan dihapus beserta fotonya.',
+      'Kunjungan ke ${_visit!.title} akan dihapus beserta semua fotonya.',
       'Hapus',
     );
     if (!ok || !mounted) return;
@@ -508,7 +686,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     });
     try {
       final report = await _withRelogin(
-        () => ErpApi.instance.deleteVisit(widget.visit!.name),
+        () => ErpApi.instance.deleteVisit(_visit!.name),
       );
       if (mounted) {
         Navigator.of(context).pop(VisitFormResult(report, 'Kunjungan dihapus.'));
@@ -516,7 +694,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     } on SessionExpiredException catch (e) {
       _sessionExpired(e);
     } catch (e) {
-      await _showError('Gagal Menghapus', e.toString());
+      if (mounted) await _showError('Gagal Menghapus', e.toString());
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -526,19 +704,21 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final String title;
-    if (_isNew) {
-      title = 'Kunjungan Baru';
-    } else if (widget.readOnly) {
-      title = 'Detail Kunjungan';
-    } else {
-      title = 'Edit Kunjungan';
-    }
+    final String title = switch (_mode) {
+      _Mode.create => 'Kunjungan Baru',
+      _Mode.open => 'Kunjungan Berlangsung',
+      _Mode.edit => 'Edit Kunjungan',
+      _Mode.view => 'Detail Kunjungan',
+    };
 
     return PopScope(
-      canPop: widget.readOnly || (_isNew && _target == null && !_saving),
+      canPop: _isView || (_isNew && _target == null && !_saving),
       onPopInvokedWithResult: (didPop, _) async {
         if (didPop || _saving) return;
+        if (_isOpen) {
+          _showSnack('Kunjungan sedang berlangsung. Tekan Check Out untuk menyelesaikan.');
+          return;
+        }
         final navigator = Navigator.of(context);
         if (!_isNew && !_hasChanges()) {
           navigator.pop();
@@ -555,44 +735,78 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
       },
       child: Scaffold(
         appBar: AppBar(
+          automaticallyImplyLeading: !_isOpen,
           title: Text(title),
           actions: [
-            if (!_isNew && !widget.readOnly)
+            if (_mode == _Mode.open || _mode == _Mode.edit)
               IconButton(
                 icon: const Icon(Icons.delete_outline),
                 tooltip: 'Hapus',
-                onPressed: _saving ? null : _delete,
+                onPressed: (_saving || _busySlot != null) ? null : _delete,
               ),
           ],
         ),
         body: _buildBody(),
-        bottomNavigationBar: (_options == null || widget.readOnly)
-            ? null
-            : SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: FilledButton(
-                    onPressed: (_loadingDetails || _saving)
-                        ? null
-                        : (_isNew ? _submit : _saveChanges),
-                    child: _saving
-                        ? Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(strokeWidth: 2),
-                              ),
-                              const SizedBox(width: 12),
-                              Text(_savingStep),
-                            ],
-                          )
-                        : Text(_isNew ? 'Simpan Kunjungan' : 'Simpan Perubahan'),
-                  ),
-                ),
-              ),
+        bottomNavigationBar: _bottomBar(),
       ),
+    );
+  }
+
+  Widget? _bottomBar() {
+    if (_options == null || _isView) return null;
+
+    final Widget child;
+    if (_saving) {
+      child = SizedBox(
+        height: 48,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            const SizedBox(width: 12),
+            Text(_savingStep),
+          ],
+        ),
+      );
+    } else if (_isNew) {
+      child = FilledButton.icon(
+        onPressed: _loadingDetails ? null : _checkIn,
+        icon: const Icon(Icons.login),
+        label: const Text('Check In'),
+      );
+    } else if (_isOpen) {
+      final busy = _busySlot != null;
+      child = Row(
+        children: [
+          Expanded(
+            child: OutlinedButton(
+              onPressed: busy ? null : _saveChanges,
+              child: const Text('Simpan'),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: FilledButton.icon(
+              onPressed: busy ? null : _checkOut,
+              icon: const Icon(Icons.logout),
+              label: const Text('Check Out'),
+            ),
+          ),
+        ],
+      );
+    } else {
+      child = FilledButton(
+        onPressed: _saveChanges,
+        child: const Text('Simpan Perubahan'),
+      );
+    }
+
+    return SafeArea(
+      child: Padding(padding: const EdgeInsets.all(16), child: child),
     );
   }
 
@@ -619,8 +833,10 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
       );
     }
 
+    final showMap = (_isNew || _isOpen) && _detailsLoaded;
+
     return AbsorbPointer(
-      absorbing: _saving || widget.readOnly,
+      absorbing: _saving || _isView,
       child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
@@ -648,9 +864,11 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
             loading: _loadingDetails,
             onTap: _isNew ? _pickTarget : null,
           ),
-          if (_isNew && _detailsLoaded)
+          if (!_isNew) _visitInfo(),
+          if (showMap) ...[
+            const SizedBox(height: 8),
             VisitMapPreview(
-              key: ValueKey(_target?.value),
+              key: ValueKey('${_target?.value}-${_targetLocation != null}'),
               target: _targetLocation == null
                   ? null
                   : LatLng(_targetLocation!.lat, _targetLocation!.lng),
@@ -658,60 +876,41 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
               radiusM: _options!.radiusM,
               accuracySlackM: _options!.accuracySlackM,
             ),
-          if (!_isNew) _visitInfo(),
+          ],
           if (_target != null) ..._detailFields(),
         ],
       ),
     );
   }
 
-  // Widget _geofenceInfo() {
-  //   final theme = Theme.of(context);
-  //   final label = _targetLabel;
-  //   final hasLocation = _targetLocation != null;
-  //   final color = hasLocation ? theme.colorScheme.primary : Colors.orange.shade800;
-  //   final text = hasLocation
-  //       ? 'Kunjungan hanya bisa disimpan dalam radius '
-  //           '${_options!.radiusM.round()} m dari lokasi $label.'
-  //       : 'Lokasi $label belum tersimpan. Lokasi Anda saat menyimpan '
-  //           'kunjungan ini akan menjadi lokasi $label.';
-
-  //   return Row(
-  //     crossAxisAlignment: CrossAxisAlignment.start,
-  //     children: [
-  //       Icon(
-  //         hasLocation ? Icons.my_location : Icons.info_outline,
-  //         size: 18,
-  //         color: color,
-  //       ),
-  //       const SizedBox(width: 8),
-  //       Expanded(
-  //         child: Text(
-  //           text,
-  //           style: theme.textTheme.bodySmall?.copyWith(color: color),
-  //         ),
-  //       ),
-  //     ],
-  //   );
-  // }
-
   Widget _visitInfo() {
-    final v = widget.visit!;
-    final jam = v.jam;
+    final v = _visit!;
+    final fmt = DateFormat.Hm();
+    final checkIn = v.checkIn ?? v.jam;
     final acc = v.data['gps_accuracy'];
     final parts = [
-      if (jam != null) 'Waktu kunjungan ${DateFormat.Hm().format(jam)}',
+      if (checkIn != null) 'Check in ${fmt.format(checkIn)}',
+      if (v.checkOut != null) 'Check out ${fmt.format(v.checkOut!)}',
       if (acc is num && acc > 0) 'akurasi GPS ±${acc.round()} m',
     ];
     if (parts.isEmpty) return const SizedBox.shrink();
     return Text(parts.join(' · '), style: Theme.of(context).textTheme.bodySmall);
   }
 
+  String _photoTitle() {
+    if (_isNew) return 'Foto Check In *';
+    if (_isOpen) {
+      return 'Foto Kunjungan (${_visit!.photoCount}/${_options!.maxPhotos}, '
+          'minimal ${_options!.minPhotosCheckOut} untuk check out)';
+    }
+    return 'Foto Kunjungan';
+  }
+
   List<Widget> _detailFields() {
     final o = _options!;
     return [
-      _section(_isNew ? 'Foto Kunjungan *' : 'Foto Kunjungan'),
-      _isNew ? _photoField() : _savedPhotoField(),
+      _section(_photoTitle()),
+      _isNew ? _checkInPhotoField() : _photoGrid(),
       _section('Kunjungan'),
       PickerField(
         label: 'Tujuan Berkunjung *',
@@ -766,87 +965,195 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     ];
   }
 
-  Widget _photoField() {
+  Widget _photoErrorText() {
+    if (_photoError == null) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 4, left: 12),
+      child: Text(
+        _photoError!,
+        style: TextStyle(color: Theme.of(context).colorScheme.error, fontSize: 12),
+      ),
+    );
+  }
+
+  Widget _checkInPhotoField() {
     final theme = Theme.of(context);
-    if (_photo == null) {
-      return Padding(
-        padding: const EdgeInsets.only(bottom: 12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            OutlinedButton.icon(
-              onPressed: _takePhoto,
-              icon: const Icon(Icons.photo_camera_outlined),
-              label: const Text('Ambil Foto'),
-            ),
-            if (_photoError != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 4, left: 12),
-                child: Text(
-                  _photoError!,
-                  style: TextStyle(color: theme.colorScheme.error, fontSize: 12),
-                ),
-              ),
-          ],
-        ),
-      );
-    }
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: Image.file(
-              File(_photo!.path),
-              height: 200,
-              fit: BoxFit.cover,
+          if (_checkInPhoto == null)
+            OutlinedButton.icon(
+              onPressed: _takeCheckInPhoto,
+              icon: const Icon(Icons.photo_camera_outlined),
+              label: const Text('Ambil Foto'),
+            )
+          else ...[
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Image.file(
+                File(_checkInPhoto!.path),
+                height: 200,
+                fit: BoxFit.cover,
+              ),
             ),
-          ),
-          TextButton.icon(
-            onPressed: _takePhoto,
-            icon: const Icon(Icons.refresh),
-            label: const Text('Ambil Ulang'),
+            TextButton.icon(
+              onPressed: _takeCheckInPhoto,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Ambil Ulang'),
+            ),
+          ],
+          _photoErrorText(),
+          const SizedBox(height: 4),
+          Text(
+            'Foto tambahan bisa diambil setelah check in.',
+            style: theme.textTheme.bodySmall,
           ),
         ],
       ),
     );
   }
 
-  Widget _savedPhotoField() {
-    final theme = Theme.of(context);
-    if (_savedPhoto == null) {
+  Widget _photoGrid() {
+    final photos = _visit!.photos;
+    final slots = _isOpen
+        ? List.generate(photos.length, (i) => i)
+        : [for (var i = 0; i < photos.length; i++) if (photos[i] != null) i];
+
+    if (slots.isEmpty) {
       return const Padding(
         padding: EdgeInsets.only(bottom: 12),
         child: Text('Tidak ada foto.'),
       );
     }
+
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(8),
-        child: FutureBuilder<Uint8List>(
-          future: _savedPhoto,
-          builder: (context, snap) {
-            if (snap.hasData) {
-              return Image.memory(snap.data!, height: 200, fit: BoxFit.cover);
-            }
-            if (snap.hasError) {
-              return Container(
-                height: 200,
-                color: theme.colorScheme.surfaceContainerHighest,
-                alignment: Alignment.center,
-                child: const Text('Foto tidak dapat dimuat.'),
-              );
-            }
-            return const SizedBox(
-              height: 200,
-              child: Center(child: CircularProgressIndicator()),
-            );
-          },
-        ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          GridView.count(
+            crossAxisCount: 2,
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            mainAxisSpacing: 8,
+            crossAxisSpacing: 8,
+            childAspectRatio: 4 / 3,
+            children: [for (final i in slots) _photoTile(i, photos[i])],
+          ),
+          _photoErrorText(),
+        ],
       ),
+    );
+  }
+
+  Widget _photoTile(int slot, String? url) {
+    final theme = Theme.of(context);
+    final busy = _busySlot == slot;
+    final canChange = _isOpen && slot > 0 && _busySlot == null && !_saving;
+
+    if (url == null) {
+      return InkWell(
+        onTap: canChange ? () => _uploadPhoto(slot) : null,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          decoration: BoxDecoration(
+            border: Border.all(color: theme.colorScheme.outline),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Center(
+            child: busy
+                ? const CircularProgressIndicator()
+                : Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.add_a_photo_outlined),
+                      const SizedBox(height: 4),
+                      Text('Tambah Foto', style: theme.textTheme.bodySmall),
+                    ],
+                  ),
+          ),
+        ),
+      );
+    }
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          _serverImage(url),
+          if (busy)
+            Container(
+              color: Colors.black38,
+              child: const Center(child: CircularProgressIndicator()),
+            ),
+          if (slot == 0)
+            Positioned(left: 6, top: 6, child: _badge('Check in', Icons.lock_outline)),
+          if (canChange)
+            Positioned(
+              right: 0,
+              top: 0,
+              child: PopupMenuButton<String>(
+                icon: const Icon(
+                  Icons.more_vert,
+                  color: Colors.white,
+                  shadows: [Shadow(blurRadius: 4)],
+                ),
+                onSelected: (v) =>
+                    v == 'retake' ? _uploadPhoto(slot) : _deletePhoto(slot),
+                itemBuilder: (_) => const [
+                  PopupMenuItem(value: 'retake', child: Text('Ambil Ulang')),
+                  PopupMenuItem(value: 'delete', child: Text('Hapus')),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _badge(String text, IconData icon) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: Colors.black54,
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 12, color: Colors.white),
+          const SizedBox(width: 4),
+          Text(text, style: const TextStyle(color: Colors.white, fontSize: 11)),
+        ],
+      ),
+    );
+  }
+
+  Widget _serverImage(String url) {
+    final theme = Theme.of(context);
+    final future =
+        _photoCache.putIfAbsent(url, () => ErpApi.instance.getFileBytes(url));
+    return FutureBuilder<Uint8List>(
+      future: future,
+      builder: (context, snap) {
+        if (snap.hasData) {
+          return Image.memory(snap.data!, fit: BoxFit.cover);
+        }
+        return Container(
+          color: theme.colorScheme.surfaceContainerHighest,
+          alignment: Alignment.center,
+          child: snap.hasError
+              ? const Icon(Icons.broken_image_outlined)
+              : const SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+        );
+      },
     );
   }
 

@@ -14,23 +14,19 @@ class LocationException implements Exception {
   String toString() => message;
 }
 
-class MockLocationException extends LocationException {
-  MockLocationException()
-      : super('Lokasi palsu (fake GPS) terdeteksi. '
-            'Matikan aplikasi fake GPS, lalu coba lagi.');
-}
-
 class VisitLocation {
   const VisitLocation({
     required this.latitude,
     required this.longitude,
     required this.accuracy,
+    required this.isMocked,
     required this.deviceRooted,
   });
 
   final double latitude;
   final double longitude;
   final double accuracy;
+  final bool isMocked;
   final bool deviceRooted;
 }
 
@@ -83,10 +79,6 @@ class LocationService {
       );
     }
 
-    if (pos.isMocked) {
-      throw MockLocationException();
-    }
-
     var rooted = false;
     try {
       rooted = await SafeDevice.isJailBroken;
@@ -98,6 +90,7 @@ class LocationService {
       latitude: pos.latitude,
       longitude: pos.longitude,
       accuracy: pos.accuracy,
+      isMocked: pos.isMocked, // sent to the server silently
       deviceRooted: rooted,
     );
   }

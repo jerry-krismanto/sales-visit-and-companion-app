@@ -17,6 +17,7 @@ class _HomeScreenState extends State<HomeScreen> {
   TodayReport? _today;
   String? _error;
   bool _loading = true;
+  bool _formOpen = false;
 
   @override
   void initState() {
@@ -31,7 +32,9 @@ class _HomeScreenState extends State<HomeScreen> {
     });
     try {
       final today = await ErpApi.instance.getTodayReport();
-      if (mounted) setState(() => _today = today);
+      if (!mounted) return;
+      setState(() => _today = today);
+      _resumeOpenVisit();
     } on SessionExpiredException catch (e) {
       _goToLogin(e.message);
     } catch (e) {
@@ -39,6 +42,15 @@ class _HomeScreenState extends State<HomeScreen> {
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  /// A checked-in visit must be finished first, so jump straight back into it.
+  void _resumeOpenVisit() {
+    final ov = _today?.openVisit;
+    if (ov == null || _formOpen) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _openVisitForm(ov.visit);
+    });
   }
 
   void _goToLogin([String? message]) {
@@ -59,26 +71,37 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _openVisitForm([Visit? visit]) async {
+    if (_formOpen) return;
+    _formOpen = true;
+
     final editable = _today?.report?.isEditable ?? false;
     final result = await Navigator.of(context).push<VisitFormResult>(
       MaterialPageRoute(
         builder: (_) => VisitFormScreen(
           visit: visit,
-          readOnly: visit != null && !editable,
+          readOnly: visit != null && !visit.isOpen && !editable,
         ),
       ),
     );
-    if (result != null && mounted) {
+
+    _formOpen = false;
+    if (!mounted) return;
+
+    if (result != null) {
       setState(() => _today = result.report);
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(result.message)));
+      _resumeOpenVisit();
+    } else {
+      _load();
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final report = _today?.report;
-    final canAdd = report != null && report.isEditable;
+    final canAdd =
+        report != null && report.isEditable && _today?.openVisit == null;
 
     return Scaffold(
       appBar: AppBar(
@@ -216,13 +239,6 @@ class _ReportView extends StatelessWidget {
                 const SizedBox(height: 4),
                 Text('${report.name} · ${report.visits.length} kunjungan',
                     style: theme.textTheme.bodySmall),
-                if (report.isEditable) ...[
-                  const SizedBox(height: 8),
-                  Text(
-                    'Laporan otomatis dikirim pukul ${today.cutoffLabel}.',
-                    style: theme.textTheme.bodySmall,
-                  ),
-                ],
               ],
             ),
           ),
@@ -242,9 +258,24 @@ class _VisitCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final jam = visit.jam;
+    final theme = Theme.of(context);
+    final fmt = DateFormat.Hm();
+    final start = visit.checkIn ?? visit.jam;
+    final end = visit.checkOut;
+
+    String? time;
+    if (start != null) {
+      if (visit.isOpen) {
+        time = '${fmt.format(start)} – berlangsung';
+      } else if (end != null) {
+        time = '${fmt.format(start)}–${fmt.format(end)}';
+      } else {
+        time = fmt.format(start);
+      }
+    }
+
     final subtitle = [
-      if (jam != null) DateFormat.Hm().format(jam),
+      if (time != null) time,
       if (visit.tujuan != null) visit.tujuan!,
       if (visit.kota != null) visit.kota!,
     ].join(' · ');
@@ -255,8 +286,11 @@ class _VisitCard extends StatelessWidget {
         leading: CircleAvatar(child: Text('${visit.idx}')),
         title: Text(visit.title),
         subtitle: Text(subtitle.isEmpty ? '-' : subtitle),
-        trailing: Text(visit.jenisLabel,
-            style: Theme.of(context).textTheme.labelSmall),
+        trailing: visit.isOpen
+            ? Text('Berlangsung',
+                style: theme.textTheme.labelSmall
+                    ?.copyWith(color: Colors.orange.shade800))
+            : Text(visit.jenisLabel, style: theme.textTheme.labelSmall),
       ),
     );
   }

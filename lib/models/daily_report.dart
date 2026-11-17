@@ -5,6 +5,7 @@ class TodayReport {
     required this.postingDate,
     required this.autoSubmitHour,
     this.report,
+    this.openVisit,
   });
 
   final String salesPerson;
@@ -13,16 +14,36 @@ class TodayReport {
   final int autoSubmitHour;
   final DailyReport? report;
 
+  /// Checked in but not checked out yet (may belong to an earlier day's report).
+  final OpenVisit? openVisit;
+
   String get cutoffLabel => '${autoSubmitHour.toString().padLeft(2, '0')}:00';
 
   factory TodayReport.fromJson(Map<String, dynamic> j) => TodayReport(
         salesPerson: j['sales_person'] ?? '',
         employeeName: j['employee_name'] ?? '',
-        postingDate: DateTime.parse(j['posting_date']),
+        postingDate: DateTime.parse(j['posting_date'].toString()),
         autoSubmitHour: (j['auto_submit_hour'] as num?)?.toInt() ?? 18,
         report: j['report'] == null
             ? null
             : DailyReport.fromJson(Map<String, dynamic>.from(j['report'])),
+        openVisit: j['open_visit'] == null
+            ? null
+            : OpenVisit.fromJson(Map<String, dynamic>.from(j['open_visit'])),
+      );
+}
+
+class OpenVisit {
+  OpenVisit({required this.report, required this.postingDate, required this.visit});
+
+  final String report;
+  final DateTime postingDate;
+  final Visit visit;
+
+  factory OpenVisit.fromJson(Map<String, dynamic> j) => OpenVisit(
+        report: j['report'],
+        postingDate: DateTime.parse(j['posting_date'].toString()),
+        visit: Visit(Map<String, dynamic>.from(j['visit'])),
       );
 }
 
@@ -54,6 +75,13 @@ class DailyReport {
 class Visit {
   Visit(this.data);
 
+  static const photoFields = [
+    'screenshot',
+    'screenshot_1',
+    'screenshot_2',
+    'screenshot_3',
+  ];
+
   final Map<String, dynamic> data;
 
   String get name => data['name'];
@@ -70,8 +98,23 @@ class Visit {
   String? get tujuan => data['tujuan_berkunjung'];
   String? get kota => data['kota'];
 
-  DateTime? get jam {
-    final raw = data['jam_kunjungan'];
+  DateTime? _dt(String key) {
+    final raw = data[key];
     return raw == null ? null : DateTime.tryParse(raw.toString());
   }
+
+  DateTime? get jam => _dt('jam_kunjungan');
+  DateTime? get checkIn => _dt('check_in');
+  DateTime? get checkOut => _dt('check_out');
+
+  /// Visits saved before check in/out existed have no check_in, so they count as finished.
+  bool get isOpen => checkIn != null && checkOut == null;
+
+  /// One entry per photo slot (null = empty).
+  List<String?> get photos => photoFields.map((f) {
+        final v = data[f];
+        return (v is String && v.isNotEmpty) ? v : null;
+      }).toList();
+
+  int get photoCount => photos.whereType<String>().length;
 }
