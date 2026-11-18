@@ -105,10 +105,10 @@ class _HomeScreenState extends State<HomeScreen> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Kirim laporan?'),
+        title: const Text('Submit Laporan?'),
         content: Text(
-          'Laporan ${_dateFmt.format(date)} akan dikirim. '
-          'Setelah dikirim, laporan tidak bisa diubah lagi.',
+          'Laporan ${_dateFmt.format(date)} akan disubmit. '
+          'Setelah disubmit, laporan tidak bisa diubah lagi.',
         ),
         actions: [
           TextButton(
@@ -117,7 +117,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Kirim'),
+            child: const Text('Submit'),
           ),
         ],
       ),
@@ -133,7 +133,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (!mounted) return;
       setState(() => _today = today);
       ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('Laporan terkirim.')));
+          .showSnackBar(const SnackBar(content: Text('Laporan berhasil disubmit.')));
     } on SessionExpiredException catch (e) {
       _goToLogin(e.message);
     } catch (e) {
@@ -141,7 +141,7 @@ class _HomeScreenState extends State<HomeScreen> {
       await showDialog<void>(
         context: context,
         builder: (ctx) => AlertDialog(
-          title: const Text('Gagal Mengirim Laporan'),
+          title: const Text('Gagal Submit Laporan'),
           content: Text(e.toString()),
           actions: [
             TextButton(
@@ -230,7 +230,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    'Laporan ${_dateFmt.format(p.postingDate)} belum dikirim',
+                    'Laporan ${_dateFmt.format(p.postingDate)} belum disubmit',
                     style: theme.textTheme.titleSmall,
                   ),
                 ),
@@ -248,7 +248,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 onPressed: p.hasOpenVisit
                     ? null
                     : () => _submitReport(p.name, p.postingDate),
-                child: const Text('Kirim'),
+                child: const Text('Submit'),
               ),
             ),
           ],
@@ -285,7 +285,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final hasOpen = t.openVisit != null;
     final canSubmit = !report.isSubmitted && report.visits.isNotEmpty && !hasOpen;
 
-    final statusText = report.isSubmitted ? 'Terkirim' : 'Draft';
+    final statusText = report.isSubmitted ? 'Submitted' : 'Draft';
     final statusColor = report.isSubmitted ? Colors.green : Colors.orange;
 
     return [
@@ -321,7 +321,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     padding: const EdgeInsets.only(bottom: 8),
                     child: Text(
                       'Selesaikan kunjungan yang sedang berlangsung '
-                      'sebelum mengirim laporan.',
+                      'sebelum submit laporan.',
                       style: theme.textTheme.bodySmall,
                     ),
                   ),
@@ -330,7 +330,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       ? () => _submitReport(report.name, t.postingDate)
                       : null,
                   icon: const Icon(Icons.send),
-                  label: const Text('Kirim Laporan'),
+                  label: const Text('Submit Laporan'),
                 ),
               ],
             ],

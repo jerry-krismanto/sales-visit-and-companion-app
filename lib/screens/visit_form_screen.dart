@@ -14,6 +14,7 @@ import '../models/form_options.dart';
 import '../services/erp_api.dart';
 import '../services/location_service.dart';
 import '../widgets/form_widgets.dart';
+import '../widgets/photo_viewer.dart';
 import '../widgets/visit_map_preview.dart';
 import 'create_lead_screen.dart';
 import 'login_screen.dart';
@@ -101,6 +102,9 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
   bool get _isExisting => _jenis == 'Existing';
   String get _targetLabel => _isExisting ? 'customer' : 'lead';
   List<String> get _typeText => _isExisting ? _existingText : _leadText;
+
+  /// Disables a field's tap handler on the view-only screen.
+  VoidCallback? _editable(VoidCallback handler) => _isView ? null : handler;
 
   @override
   void initState() {
@@ -462,6 +466,36 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     } finally {
       if (mounted) setState(() => _busySlot = null);
     }
+  }
+
+  Future<Uint8List> _photoFuture(String url) =>
+      _photoCache.putIfAbsent(url, () => ErpApi.instance.getFileBytes(url));
+
+  /// Full-screen viewer over all saved photos of this visit, starting at [slot].
+  void _openSavedPhotos(int slot) {
+    final photos = _visit!.photos;
+    final filled = [
+      for (var i = 0; i < photos.length; i++)
+        if (photos[i] != null) i,
+    ];
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => PhotoViewerScreen(
+          photos: [for (final i in filled) _photoFuture(photos[i]!)],
+          initialIndex: filled.indexOf(slot),
+        ),
+      ),
+    );
+  }
+
+  void _openCheckInPreview() {
+    final photo = _checkInPhoto;
+    if (photo == null) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => PhotoViewerScreen(photos: [photo.readAsBytes()]),
+      ),
+    );
   }
 
   // ---------- payloads ----------
@@ -874,7 +908,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
     final showMap = (_isNew || _isOpen) && _detailsLoaded;
 
     return AbsorbPointer(
-      absorbing: _saving || _isView,
+      absorbing: _saving,
       child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
@@ -960,7 +994,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
         label: 'Tipe Kunjungan *',
         value: _tipe,
         errorText: _tipeError,
-        onTap: () async {
+        onTap: _editable(() async {
           final v = await pickOption(context, 'Tipe Kunjungan', o.tipeKunjungan, _tipe);
           if (v != null && mounted) {
             setState(() {
@@ -968,13 +1002,13 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
               _tipeError = null;
             });
           }
-        },
+        }),
       ),
       PickerField(
         label: 'Tujuan Berkunjung *',
         value: _tujuan,
         errorText: _tujuanError,
-        onTap: () async {
+        onTap: _editable(() async {
           final v = await pickOption(context, 'Tujuan Berkunjung', o.tujuan, _tujuan);
           if (v != null && mounted) {
             setState(() {
@@ -982,20 +1016,20 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
               _tujuanError = null;
             });
           }
-        },
+        }),
       ),
       if (!_isExisting)
         PickerField(
           label: 'Priority',
           value: _priority,
-          onTap: () async {
+          onTap: _editable(() async {
             final v = await pickOption(context, 'Priority', o.priority, _priority);
             if (v != null && mounted) setState(() => _priority = v);
-          },
+          }),
         ),
       _text('note', 'Note (Keterangan Tambahan)', maxLines: 3),
       _section('Lokasi'),
-      PickerField(label: 'Kota', value: _kota, onTap: _pickKota),
+      PickerField(label: 'Kota', value: _kota, onTap: _editable(_pickKota)),
       _text('alamat', 'Alamat', maxLines: 3),
       _section('PIC'),
       _text(_isExisting ? 'pic_customer' : 'pic_lead', 'Nama PIC'),
@@ -1048,12 +1082,15 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
               label: const Text('Ambil Foto'),
             )
           else ...[
-            ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: Image.file(
-                File(_checkInPhoto!.path),
-                height: 200,
-                fit: BoxFit.cover,
+            GestureDetector(
+              onTap: _openCheckInPreview,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Image.file(
+                  File(_checkInPhoto!.path),
+                  height: 200,
+                  fit: BoxFit.cover,
+                ),
               ),
             ),
             TextButton.icon(
@@ -1141,7 +1178,10 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          _serverImage(url),
+          GestureDetector(
+            onTap: busy ? null : () => _openSavedPhotos(slot),
+            child: _serverImage(url),
+          ),
           if (busy)
             Container(
               color: Colors.black38,
@@ -1192,10 +1232,8 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
 
   Widget _serverImage(String url) {
     final theme = Theme.of(context);
-    final future =
-        _photoCache.putIfAbsent(url, () => ErpApi.instance.getFileBytes(url));
     return FutureBuilder<Uint8List>(
-      future: future,
+      future: _photoFuture(url),
       builder: (context, snap) {
         if (snap.hasData) {
           return Image.memory(snap.data!, fit: BoxFit.cover);
@@ -1226,6 +1264,7 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
       padding: const EdgeInsets.only(bottom: 12),
       child: TextFormField(
         controller: _ctrl[field],
+        readOnly: _isView,
         keyboardType: maxLines > 1 ? TextInputType.multiline : keyboard,
         minLines: 1,
         maxLines: maxLines,
