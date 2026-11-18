@@ -415,10 +415,26 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
       _photoError = null;
     });
     try {
+      final loc = await LocationService.getVisitLocation();
+      final gps = {
+        'latitude': loc.latitude,
+        'longitude': loc.longitude,
+        'gps_accuracy': loc.accuracy,
+        'is_mock_location': loc.isMocked ? 1 : 0,
+      };
       final r = await _withRelogin(
-        () => ErpApi.instance.uploadVisitPhoto(_visit!.name, slot, photo.path),
+        () => ErpApi.instance.uploadVisitPhoto(_visit!.name, slot, photo.path, gps),
       );
       if (mounted) _applyOpenVisit(r);
+    } on LocationException catch (e) {
+      if (mounted) {
+        await _showError(
+          'Lokasi Tidak Tersedia',
+          e.message,
+          actionLabel: e.fixLabel,
+          action: e.fix,
+        );
+      }
     } on SessionExpiredException catch (e) {
       _sessionExpired(e);
     } catch (e) {

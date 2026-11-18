@@ -106,17 +106,22 @@ class ErpApi {
   Future<TodayReport> deleteVisit(String name) async => _report(
       await _call('POST', '$_m.delete_visit', data: {'visit_name': name}));
 
-  /// Add or replace photo [slot] (1-3) of the open visit.
+  /// Add or replace photo [slot] (1-3) of the open visit; [gps] is stamped on it.
   Future<TodayReport> uploadVisitPhoto(
-      String visitName, int slot, String photoPath) async {
+    String visitName,
+    int slot,
+    String photoPath,
+    Map<String, dynamic> gps,
+  ) async {
     final form = FormData.fromMap({
       'visit_name': visitName,
       'slot': slot,
+      ...gps,
       'photo': await _photoPart(photoPath),
     });
     return _report(await _call('POST', '$_m.upload_visit_photo', data: form));
   }
-
+  
   Future<TodayReport> deleteVisitPhoto(String visitName, int slot) async =>
       _report(await _call('POST', '$_m.delete_visit_photo', data: {
         'visit_name': visitName,
