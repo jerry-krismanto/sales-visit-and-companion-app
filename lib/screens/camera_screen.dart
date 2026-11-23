@@ -15,6 +15,7 @@ class CameraScreen extends StatefulWidget {
 
 class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver {
   CameraController? _controller;
+  List<CameraDescription> _cameras = [];
   CameraDescription? _camera;
   bool _initializing = false;
   String? _error;
@@ -22,6 +23,12 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   bool _taking = false;
   XFile? _captured;
   FlashMode _flash = FlashMode.off;
+
+  bool get _canSwitch {
+    final dirs = _cameras.map((c) => c.lensDirection).toSet();
+    return dirs.contains(CameraLensDirection.back) &&
+        dirs.contains(CameraLensDirection.front);
+  }
 
   @override
   void initState() {
@@ -53,6 +60,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     }
   }
 
+  /// Opens [_camera] (the back camera the first time).
   Future<void> _init() async {
     if (_initializing) return;
     _initializing = true;
@@ -61,17 +69,17 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
       _permissionDenied = false;
     });
     try {
-      if (_camera == null) {
-        final cameras = await availableCameras();
-        if (cameras.isEmpty) {
+      if (_cameras.isEmpty) {
+        _cameras = await availableCameras();
+        if (_cameras.isEmpty) {
           if (mounted) setState(() => _error = 'Kamera tidak ditemukan.');
           return;
         }
-        _camera = cameras.firstWhere(
-          (c) => c.lensDirection == CameraLensDirection.back,
-          orElse: () => cameras.first,
-        );
       }
+      _camera ??= _cameras.firstWhere(
+        (c) => c.lensDirection == CameraLensDirection.back,
+        orElse: () => _cameras.first,
+      );
 
       final controller = CameraController(
         _camera!,
@@ -103,6 +111,25 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     } finally {
       _initializing = false;
     }
+  }
+
+  /// Back <-> front.
+  Future<void> _switchCamera() async {
+    if (!_canSwitch || _initializing || _taking) return;
+
+    final target = _camera?.lensDirection == CameraLensDirection.front
+        ? CameraLensDirection.back
+        : CameraLensDirection.front;
+    final next = _cameras.firstWhere((c) => c.lensDirection == target);
+
+    final old = _controller;
+    setState(() {
+      _controller = null;
+      _camera = next;
+      _flash = FlashMode.off; // most front cameras have no flash
+    });
+    await old?.dispose();
+    await _init();
   }
 
   Future<void> _takePicture() async {
@@ -200,6 +227,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
             children: [
               IconButton(
+                tooltip: 'Flash',
                 icon: Icon(_flashIcon, color: ready ? Colors.white : Colors.white38),
                 onPressed: ready ? _toggleFlash : null,
               ),
@@ -221,7 +249,17 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
                   ),
                 ),
               ),
-              const SizedBox(width: 48), // balances the flash button
+              if (_canSwitch)
+                IconButton(
+                  tooltip: 'Ganti kamera',
+                  icon: Icon(
+                    Icons.cameraswitch_outlined,
+                    color: ready ? Colors.white : Colors.white38,
+                  ),
+                  onPressed: ready ? _switchCamera : null,
+                )
+              else
+                const SizedBox(width: 48), // keeps the shutter centered
             ],
           ),
         ),
