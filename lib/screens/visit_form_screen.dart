@@ -4,7 +4,8 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:image_picker/image_picker.dart';
+import 'package:camera/camera.dart' show XFile;
+import 'camera_screen.dart';
 import 'package:intl/intl.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:uuid/uuid.dart';
@@ -385,19 +386,13 @@ class _VisitFormScreenState extends State<VisitFormScreen> {
 
   // ---------- photos ----------
 
-  Future<XFile?> _capturePhoto() async {
-    try {
-      return await ImagePicker().pickImage(
-        source: ImageSource.camera,
-        preferredCameraDevice: CameraDevice.rear,
-        imageQuality: 70,
-        maxWidth: 1600,
-        maxHeight: 1600,
-      );
-    } catch (e) {
-      if (mounted) _showSnack('Kamera tidak dapat dibuka: $e');
-      return null;
-    }
+  Future<XFile?> _capturePhoto() {
+    return Navigator.of(context).push<XFile>(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => const CameraScreen(),
+      ),
+    );
   }
 
   Future<void> _takeCheckInPhoto() async {
